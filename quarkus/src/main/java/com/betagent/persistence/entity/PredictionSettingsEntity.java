@@ -27,6 +27,8 @@ public class PredictionSettingsEntity {
     public double minEdge;
     @Column(name="min_confidence_low", nullable=false)
     public double minConfidenceLow;
+    @Column(name="wilson_scale_by_implied", nullable=false)
+    public boolean wilsonScaleByImplied = true;
     @Column(name="updated_at", nullable=false)
     public LocalDateTime updatedAt;
 }

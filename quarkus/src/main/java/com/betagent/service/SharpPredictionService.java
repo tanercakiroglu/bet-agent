@@ -93,7 +93,9 @@ public class SharpPredictionService {
                                 if (nesineOnlyHtft && !Markets.HTFT.equals(market)) {
                                     continue;
                                 }
-                                if (oddsApiKgOnly && !Markets.FIRST_HALF_KG_TARAF.equals(market)) {
+                                if (oddsApiKgOnly
+                                        && !Markets.FIRST_HALF_KG_TARAF.equals(market)
+                                        && !(Markets.FIRST_HALF_BTTS.equals(market) && "VAR".equals(outcome))) {
                                     continue;
                                 }
                                 if (!Markets.CANDIDATE_OUTCOMES.getOrDefault(market, Set.of()).contains(outcome)) {
@@ -141,8 +143,12 @@ public class SharpPredictionService {
         double implied = 1 / odds;
         double edge = hitRate - implied;
         double confidenceLow = ScoreMath.wilsonLow(hitCount, sampleCount, 1.96);
-        double wilsonFloor = ScoreMath.wilsonMinThreshold(market, implied, thresholds.minConfidenceLow());
-        if (edge < thresholds.minEdge() || confidenceLow < wilsonFloor) {
+        double wilsonFloor = ScoreMath.wilsonMinThreshold(
+                market, implied, thresholds.minConfidenceLow(), thresholds.wilsonScaleByImplied());
+        double minEdge = Markets.FIRST_HALF_BTTS.equals(market)
+                ? Math.min(thresholds.minEdge(), 0.05)
+                : thresholds.minEdge();
+        if (edge < minEdge || confidenceLow < wilsonFloor) {
             return null;
         }
         double roi = hitRate * odds - 1;
@@ -209,7 +215,8 @@ public class SharpPredictionService {
             Mutiny.Query<Object[]> query = (Mutiny.Query<Object[]>) (Mutiny.Query<?>) session.createNativeQuery(
                     """
                     with scored as (
-                        select s.provider_match_id, s.ht_result, s.htft_code, s.first_half_kg_taraf_code,
+                        select s.provider_match_id, s.ht_result, s.htft_code, s.first_half_kg,
+                               s.first_half_kg_taraf_code,
                                coalesce(m.competition_code, pe.league_name, '') as competition_code,
                                coalesce(pe.league_name, m.competition_code, '') as league_name,
                                coalesce(pe.league_slug, '') as league_slug
@@ -227,6 +234,9 @@ public class SharpPredictionService {
                                    when o.market = 'FIRST_HALF_1X2' then s.ht_result = o.outcome
                                    when o.market = 'HTFT' then s.htft_code = o.outcome
                                    when o.market = 'FIRST_HALF_KG_TARAF' then s.first_half_kg_taraf_code = o.outcome
+                                   when o.market = 'FIRST_HALF_BTTS' then
+                                       (o.outcome = 'VAR' and s.first_half_kg = 'VAR')
+                                       or (o.outcome = 'YOK' and s.first_half_kg = 'YOK')
                                    else false
                                end as won
                         from odds_snapshots o
@@ -277,6 +287,11 @@ public class SharpPredictionService {
 
                 if (Markets.FIRST_HALF_BTTS.equals(market) && "VAR".equals(outcome)) {
                     bttsVarByMatchBook.put(matchId + "::" + bookmaker, decimalOdds);
+                    samples.add(new HistoricalSample(
+                            competitionCode, market, outcome, ScoreMath.oddsBand(decimalOdds), won));
+                    continue;
+                }
+                if (Markets.FIRST_HALF_BTTS.equals(market)) {
                     continue;
                 }
                 if (Markets.FIRST_HALF_1X2.equals(market)) {
@@ -345,8 +360,8 @@ public class SharpPredictionService {
     }
 
     private static boolean hasCandidateOdds(PendingFixture fixture, boolean nesineOnlyHtft, boolean oddsApiKgOnly) {
+        boolean hasKgTaraf = false;
         boolean hasBttsVar = false;
-        boolean hasSide = false;
         for (String key : fixture.markets().keySet()) {
             String[] parts = key.split("::");
             if (parts.length != 2) {
@@ -361,17 +376,17 @@ public class SharpPredictionService {
             if (oddsApiKgOnly) {
                 if (Markets.FIRST_HALF_KG_TARAF.equals(market)
                         && Markets.CANDIDATE_OUTCOMES.getOrDefault(market, Set.of()).contains(outcome)) {
-                    return true;
+                    hasKgTaraf = true;
                 }
                 if (Markets.FIRST_HALF_BTTS.equals(market) && "VAR".equals(outcome)) {
                     hasBttsVar = true;
                 }
-                if (Markets.FIRST_HALF_1X2.equals(market)) {
-                    hasSide = true;
-                }
             }
         }
-        return oddsApiKgOnly && hasBttsVar && hasSide;
+        if (oddsApiKgOnly) {
+            return hasKgTaraf || hasBttsVar;
+        }
+        return false;
     }
 
     private Uni<List<PendingFixture>> loadPendingFixtures(String catalogName, Map<String, ProviderEventEntity> eventsById) {

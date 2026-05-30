@@ -69,9 +69,13 @@ public final class ScoreMath {
         return Math.max(0.0, (center - margin) / denom);
     }
 
-    /** İY KG+taraf ve HT/FT gibi nadir kombinasyonlarda mutlak %35 Wilson mümkün değil; implied ile ölçekle. */
-    public static double wilsonMinThreshold(String market, double implied, double minConfidenceLow) {
-        if (Markets.FIRST_HALF_KG_TARAF.equals(market) || Markets.HTFT.equals(market)) {
+    /** İY KG+taraf, İY KG ve HT/FT gibi nadir kombinasyonlarda mutlak %35 Wilson mümkün değil; implied ile ölçekle. */
+    public static double wilsonMinThreshold(
+            String market, double implied, double minConfidenceLow, boolean scaleByImplied) {
+        if (scaleByImplied
+                && (Markets.FIRST_HALF_KG_TARAF.equals(market)
+                        || Markets.FIRST_HALF_BTTS.equals(market)
+                        || Markets.HTFT.equals(market))) {
             return minConfidenceLow * implied;
         }
         return minConfidenceLow;

@@ -177,7 +177,15 @@ public class CollectorResource {
             return Uni.createFrom().item(Response.status((Response.Status)Response.Status.BAD_REQUEST).entity(Map.of("message", "min_confidence_low 0.00-1.00 arasi olmali.")).build());
         }
         OddsDataProvider provider = this.providerRegistry.active();
-        return this.predictionSettingsService.update(provider.catalogName(), request.min_samples, request.min_edge, request.min_confidence_low).chain(PredictionSettingsService::toMap).map(payload -> Response.ok(payload).build());
+        return this.predictionSettingsService
+                .update(
+                        provider.catalogName(),
+                        request.min_samples,
+                        request.min_edge,
+                        request.min_confidence_low,
+                        request.wilson_scale_by_implied == null || request.wilson_scale_by_implied)
+                .chain(PredictionSettingsService::toMap)
+                .map(payload -> Response.ok(payload).build());
     }
 
     @POST
@@ -264,6 +272,7 @@ public class CollectorResource {
         public Integer min_samples;
         public Double min_edge;
         public Double min_confidence_low;
+        public Boolean wilson_scale_by_implied;
     }
 }
 

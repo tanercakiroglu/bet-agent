@@ -86,6 +86,7 @@ type PredictionSettings = {
   min_samples: number;
   min_edge: number;
   min_confidence_low: number;
+  wilson_scale_by_implied?: boolean;
   updated_at?: string;
 };
 
@@ -241,6 +242,11 @@ const PENDING_ODDS_SECTIONS = [
     title: "Odds-API.io · Ilk Yari Karsilikli Gol + Taraf",
     match: (p: Prediction) => p.market === "FIRST_HALF_KG_TARAF",
   },
+  {
+    id: "oddsapi-btts",
+    title: "Odds-API.io · Ilk Yari Karsilikli Gol",
+    match: (p: Prediction) => p.market === "FIRST_HALF_BTTS",
+  },
 ] as const;
 
 function sortPredictionsByOdds(items: Prediction[]) {
@@ -299,6 +305,9 @@ function marketLabel(market: string, outcome: string) {
   if (market === "FIRST_HALF_KG_TARAF") {
     const side = outcome.replace("KG_VAR_", "");
     return `Ilk Yari Karsilikli Gol (Var) + Ilk Yari Taraf ${side}`;
+  }
+  if (market === "FIRST_HALF_BTTS") {
+    return outcome === "VAR" ? "Ilk Yari Karsilikli Gol (Var)" : `Ilk Yari Karsilikli Gol (${outcome})`;
   }
   return `${market} ${outcome}`;
 }
@@ -406,11 +415,13 @@ export default function App() {
     min_samples: 8,
     min_edge: 0.08,
     min_confidence_low: 0.45,
+    wilson_scale_by_implied: true,
   });
   const [settingsDraft, setSettingsDraft] = useState({
     min_samples: "8",
     min_edge: "0.08",
     min_confidence_low: "0.45",
+    wilson_scale_by_implied: true,
   });
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [toasts, setToasts] = useState<{ id: number; message: string; tone: "info" | "warn" }[]>([]);
@@ -429,6 +440,7 @@ export default function App() {
       min_samples: String(next.min_samples),
       min_edge: String(next.min_edge),
       min_confidence_low: String(next.min_confidence_low),
+      wilson_scale_by_implied: next.wilson_scale_by_implied !== false,
     });
   };
 
@@ -444,6 +456,7 @@ export default function App() {
       min_samples: minSamples,
       min_edge: minEdge,
       min_confidence_low: minConfidence,
+      wilson_scale_by_implied: settingsDraft.wilson_scale_by_implied,
     };
   };
 
@@ -474,6 +487,7 @@ export default function App() {
         min_samples: dash.prediction_settings.min_samples,
         min_edge: dash.prediction_settings.min_edge,
         min_confidence_low: dash.prediction_settings.min_confidence_low,
+        wilson_scale_by_implied: dash.prediction_settings.wilson_scale_by_implied !== false,
         updated_at: dash.prediction_settings.updated_at,
       };
       setSettings(next);
@@ -1145,12 +1159,35 @@ export default function App() {
                 }}
               />
             </label>
+            <label className="checkboxSetting">
+              <input
+                type="checkbox"
+                checked={settingsDraft.wilson_scale_by_implied}
+                onChange={(e) => {
+                  setSettingsDraft((d) => ({ ...d, wilson_scale_by_implied: e.target.checked }));
+                  setSettingsDirty(true);
+                }}
+              />
+              <span>
+                Wilson esigini oranla olcekli hesapla (implied × min)
+                <small>
+                  Acik: gevsek — oran 5.0 ise taban ~%9 (0.45×0.20). Kapali: siki — sabit %45 taban.
+                </small>
+              </span>
+            </label>
           </div>
           <div className="formulaBox">
             <strong>Formul</strong>
-            <span>edge = hit_rate - (1 / oran)</span>
+            <span>implied = 1 / oran (bahiscinin ima ettigi olasilik; oran 5.0 → %20)</span>
+            <span>edge = hit_rate - implied</span>
             <span>ROI = hit_rate × oran - 1</span>
-            <span>Wilson alt sinir ≥ min_confidence_low ve edge ≥ min_edge ve n ≥ min_samples</span>
+            <span>
+              Wilson alt sinir ≥
+              {settingsDraft.wilson_scale_by_implied
+                ? " min × implied (IY KG, IY KG+taraf, HT/FT)"
+                : " min (sabit, tum marketler)"}{" "}
+              ve edge ≥ min_edge ve n ≥ min_samples
+            </span>
             {settings?.updated_at && <span>Son ayar: {formatDt(settings.updated_at)}</span>}
           </div>
           {pendingOddsSections.map((section) => (

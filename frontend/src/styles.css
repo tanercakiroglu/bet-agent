@@ -201,6 +201,29 @@ h1 { margin: 0.4rem 0; font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1; }
   padding: 0.5rem 0.6rem;
 }
 
+.predictionSettings input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+.checkboxSetting {
+  grid-column: 1 / -1;
+  display: flex !important;
+  align-items: flex-start;
+  gap: 0.55rem;
+  cursor: pointer;
+}
+.checkboxSetting span {
+  display: grid;
+  gap: 0.2rem;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+.checkboxSetting small {
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
 .panel { padding: 1.2rem; margin-top: 1rem; }
 .panel h2 { margin: 0; }
 .panelHead { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; }

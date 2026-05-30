@@ -20,5 +20,8 @@ public interface PredictionConfig {
 
     @WithDefault(value="0.45")
     public double minConfidenceLow();
+
+    @WithDefault(value="true")
+    public boolean wilsonScaleByImplied();
 }
 
