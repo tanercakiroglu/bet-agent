@@ -174,6 +174,7 @@ public class SharpPredictionService {
         row.put("confidence_tier", confidenceTier(confidenceLow, sampleCount));
         row.put("score", score);
         row.put("scope", scope);
+        row.put("play_pick", isPlayPick(edge, roi, sampleCount, thresholds));
         row.put(
                 "rationale",
                 scope
@@ -475,6 +476,14 @@ public class SharpPredictionService {
             return "orta";
         }
         return "dusuk";
+    }
+
+    /** Gosterim filtresinden daha siki: n>=8, edge>=8%, pozitif ROI. */
+    private static boolean isPlayPick(
+            double edge, double roi, int sampleCount, PredictionSettingsService.PredictionThresholds thresholds) {
+        int minSamples = Math.max(8, thresholds.minSamples());
+        double minEdge = Math.max(0.08, thresholds.minEdge());
+        return sampleCount >= minSamples && edge >= minEdge && roi > 0;
     }
 
     private static double round4(double v) {

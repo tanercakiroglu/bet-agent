@@ -167,6 +167,7 @@ type Prediction = {
   confidence_low?: number;
   confidence_tier?: string;
   score?: number;
+  play_pick?: boolean;
   scope?: string;
   rationale?: string;
 };
@@ -281,6 +282,15 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 function pct(v: number) {
   return `${(v * 100).toFixed(1)}%`;
+}
+
+function isPlayPick(p: Prediction, minSamples = 8, minEdge = 0.08) {
+  if (p.play_pick != null) {
+    return p.play_pick;
+  }
+  const sampleFloor = Math.max(8, minSamples);
+  const edgeFloor = Math.max(0.08, minEdge);
+  return (p.sample_count ?? 0) >= sampleFloor && (p.edge ?? 0) >= edgeFloor && (p.historical_roi ?? 0) > 0;
 }
 
 function marketLabel(market: string, outcome: string) {
@@ -749,12 +759,15 @@ export default function App() {
           {dashboard.data_quality.htft_pending_outcomes && dashboard.data_quality.htft_pending_outcomes.length > 0 && (
             <div className="qualityBands htftOutcomes">
               <span className="htftOutcomeHead">
-                HT/FT bekleyen mac: {dashboard.data_quality.htft_distinct_pending_matches ?? "—"} · Bitmis mac:{" "}
-                {dashboard.data_quality.htft_settled_matches ?? 0}
+                HT/FT orani olan mac: {dashboard.data_quality.htft_distinct_pending_matches ?? "—"} · Gercek sonucu
+                1/2·2/1·1/X·2/X olan: {dashboard.data_quality.htft_settled_matches ?? 0}
+              </span>
+              <span className="htftOutcomeHint">
+                Oran = bultende fiyat var · Sonuc = mac bitti ve skor o kombinasyona uyuyor
               </span>
               {dashboard.data_quality.htft_pending_outcomes.map((row) => (
                 <span key={row.outcome}>
-                  {row.outcome}: {row.pending_matches} bekleyen oran · {row.settled_matches ?? 0} bitti
+                  {row.outcome}: {row.pending_matches} mac orani · {row.settled_matches ?? 0} sonuc {row.outcome}
                 </span>
               ))}
             </div>
@@ -767,14 +780,14 @@ export default function App() {
                   <article key={providerQuality.provider} className="qualityProviderBlock">
                     <h3>{providerQuality.provider}</h3>
                     <p className="meta">
-                      HT/FT bekleyen: {providerQuality.htft_distinct_pending_matches ?? htftMarket?.pending_matches_with_odds ?? 0} ·
-                      skorlu: {providerQuality.scored_matches ?? 0} · HT/FT bitmis: {providerQuality.htft_settled_matches ?? 0}
+                      HT/FT orani: {providerQuality.htft_distinct_pending_matches ?? htftMarket?.pending_matches_with_odds ?? 0} ·
+                      skorlu mac: {providerQuality.scored_matches ?? 0} · HT/FT hedef sonuc: {providerQuality.htft_settled_matches ?? 0}
                     </p>
                     {providerQuality.htft_pending_outcomes && providerQuality.htft_pending_outcomes.length > 0 && (
                       <div className="qualityBands htftOutcomes">
                         {providerQuality.htft_pending_outcomes.map((row) => (
                           <span key={`${providerQuality.provider}-${row.outcome}`}>
-                            {row.outcome}: {row.pending_matches} oran · {row.settled_matches ?? 0} bitti
+                            {row.outcome}: {row.pending_matches} mac orani · {row.settled_matches ?? 0} sonuc {row.outcome}
                           </span>
                         ))}
                       </div>
@@ -1099,7 +1112,7 @@ export default function App() {
             </div>
           </div>
           <p className="hint">
-            Nesine HT/FT (1/2 · 2/1 · 1/X · 2/X) + Odds-API.io ilk yari karsilikli gol + taraf (IY KG-VAR × IY 1X2). Gecmis band analizi ile edge/ROI/Wilson filtresi. En yuksek oran ustte.
+            Nesine HT/FT (1/2 · 2/1 · 1/X · 2/X) + Odds-API.io ilk yari karsilikli gol + taraf (IY KG-VAR × IY 1X2). ★ = oyna onerisi (n≥8, edge≥8%, ROI&gt;0). En yuksek oran ustte.
           </p>
           <div className="predictionSettings">
             <label>
@@ -1149,11 +1162,18 @@ export default function App() {
                 <p className="empty">Bu kaynak icin keskin tahmin yok. Veri topla veya filtreleri gevset.</p>
               ) : (
                 <div className="grid">
-                  {section.items.map((p) => (
+                  {section.items.map((p) => {
+                    const playPick = isPlayPick(p, settings?.min_samples, settings?.min_edge);
+                    return (
                     <article
                       key={`${p.provider_match_id}-${p.market}-${p.outcome}-${p.bookmaker}`}
-                      className={`card tier-${p.confidence_tier ?? "dusuk"}`}
+                      className={`card tier-${p.confidence_tier ?? "dusuk"}${playPick ? " card-play" : ""}`}
                     >
+                      {playPick && (
+                        <div className="playStar" title="Oyna onerisi — n≥8, edge≥8%, pozitif ROI">
+                          ★ OYNA
+                        </div>
+                      )}
                       <div className="cardTop">
                         <span className={`badge ${p.confidence_tier ?? "dusuk"}`}>
                           {p.confidence_tier ?? "dusuk"}
@@ -1197,7 +1217,8 @@ export default function App() {
                       </dl>
                       {p.rationale && <p className="hint">{p.rationale}</p>}
                     </article>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
