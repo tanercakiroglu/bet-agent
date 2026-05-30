@@ -55,6 +55,12 @@ import org.hibernate.reactive.mutiny.Mutiny;
 @WithSession
 public class WarehouseService {
     public static final String HTFT_SCORES_ONLY_BOOKMAKER = "Skor";
+    private static final String ACTIVE_PENDING_EVENT_JOIN = """
+            inner join provider_events pe_active
+              on pe_active.provider = o.provider
+             and pe_active.provider_match_id = o.provider_match_id
+             and lower(coalesce(pe_active.status, 'pending')) = 'pending'
+            """;
     @Inject
     MatchRepository matchRepository;
     @Inject
@@ -65,6 +71,34 @@ public class WarehouseService {
     ProviderEventRepository providerEventRepository;
     @Inject
     ProviderSyncRunRepository syncRunRepository;
+
+    @WithTransaction
+    public Uni<Void> reconcileOffBultenPending(String catalogName, List<String> activePendingIds) {
+        return Panache.getSession().flatMap(session -> {
+            if (activePendingIds == null || activePendingIds.isEmpty()) {
+                return session.createNativeQuery("""
+                        update provider_events
+                        set status = 'off_bulten'
+                        where provider = :catalog
+                          and lower(coalesce(status, 'pending')) = 'pending'
+                        """)
+                        .setParameter("catalog", catalogName)
+                        .executeUpdate()
+                        .replaceWithVoid();
+            }
+            return session.createNativeQuery("""
+                    update provider_events
+                    set status = 'off_bulten'
+                    where provider = :catalog
+                      and lower(coalesce(status, 'pending')) = 'pending'
+                      and provider_match_id not in (:ids)
+                    """)
+                    .setParameter("catalog", catalogName)
+                    .setParameter("ids", activePendingIds)
+                    .executeUpdate()
+                    .replaceWithVoid();
+        });
+    }
 
     @WithTransaction
     public Uni<Void> upsertProviderEvent(ProviderEventEntity incoming) {
@@ -255,7 +289,15 @@ public class WarehouseService {
             return this.matchScoreRepository.count("provider", new Object[]{catalogName});
         }).chain(scoredMatches -> {
             quality.put("scored_matches", scoredMatches);
-            return WarehouseService.nativeRows(session, "select o.market, count(distinct o.provider_match_id)\nfrom odds_snapshots o\nwhere o.provider = :catalog\n  and o.snapshot_type = 'hourly_pending'\n  and o.market in ('HTFT', 'FIRST_HALF_1X2', 'FIRST_HALF_KG_TARAF', 'FIRST_HALF_BTTS')\ngroup by o.market\n", Map.of("catalog", catalogName));
+            return WarehouseService.nativeRows(session, """
+                    select o.market, count(distinct o.provider_match_id)
+                    from odds_snapshots o
+                    """ + ACTIVE_PENDING_EVENT_JOIN + """
+                    where o.provider = :catalog
+                      and o.snapshot_type = 'hourly_pending'
+                      and o.market in ('HTFT', 'FIRST_HALF_1X2', 'FIRST_HALF_KG_TARAF', 'FIRST_HALF_BTTS')
+                    group by o.market
+                    """, Map.of("catalog", catalogName));
         }).chain(pendingByMarket -> {
             HashMap<String, Long> pendingCounts = new HashMap<String, Long>();
             for (Object[] row : pendingByMarket) {
@@ -309,6 +351,7 @@ public class WarehouseService {
                 """
                 select o.outcome, count(distinct o.provider_match_id)
                 from odds_snapshots o
+                """ + ACTIVE_PENDING_EVENT_JOIN + """
                 where o.provider = :catalog
                   and o.market = 'HTFT'
                   and o.snapshot_type = 'hourly_pending'
@@ -320,6 +363,7 @@ public class WarehouseService {
                 """
                 select count(distinct o.provider_match_id)
                 from odds_snapshots o
+                """ + ACTIVE_PENDING_EVENT_JOIN + """
                 where o.provider = :catalog
                   and o.market = 'HTFT'
                   and o.snapshot_type = 'hourly_pending'
@@ -409,7 +453,7 @@ public class WarehouseService {
             return this.htftScoresOnlyPage(catalogNames, safePage, safeSize, offset);
         }
         String bookmakerClause = bookmaker != null && !bookmaker.isBlank() ? " and lo.bookmaker = :bookmaker" : "";
-        String baseCte = "with latest_odds as (\n    select distinct on (o.provider, o.provider_match_id, o.bookmaker, o.outcome)\n           o.provider,\n           o.provider_match_id,\n           o.bookmaker,\n           o.outcome,\n           o.decimal_odds,\n           o.snapshot_at\n    from odds_snapshots o\n    where o.provider in :catalogs\n      and o.market = 'HTFT'\n      and o.snapshot_type in ('hourly_pending', 'hourly_settled')\n      and o.outcome in ('1/2', '2/1', '1/X', '2/X')\n    order by o.provider, o.provider_match_id, o.bookmaker, o.outcome,\n             case o.snapshot_type when 'hourly_settled' then 0 else 1 end,\n             o.snapshot_at desc nulls last, o.id desc\n),\ngrouped as (\n    select lo.provider,\n           lo.provider_match_id,\n           lo.bookmaker,\n           max(lo.snapshot_at) as snapshot_at,\n           max(case when lo.outcome = '1/2' then lo.decimal_odds end) as odd_12,\n           max(case when lo.outcome = '2/1' then lo.decimal_odds end) as odd_21,\n           max(case when lo.outcome = '1/X' then lo.decimal_odds end) as odd_1x,\n           max(case when lo.outcome = '2/X' then lo.decimal_odds end) as odd_2x\n    from latest_odds lo\n    where 1=1" + bookmakerClause + "    group by lo.provider, lo.provider_match_id, lo.bookmaker\n),\nfiltered as (\n    select g.*,\n           coalesce(m.competition_code, pe.league_name) as competition_code,\n           coalesce(m.match_date, cast(pe.event_date as date)) as match_date,\n           coalesce(pe.event_date, cast(m.match_date as timestamp)) as kickoff_at,\n           to_char(\n               coalesce(pe.event_date, cast(m.match_date as timestamp)),\n               'YYYY-MM-DD HH24:MI'\n           ) as kickoff_at_text,\n           coalesce(m.home_team, pe.home_team) as home_team,\n           coalesce(m.away_team, pe.away_team) as away_team,\n           s.hthg, s.htag, s.fthg, s.ftag, s.htft_code,\n           case when s.provider_match_id is not null then 'finished' else 'pending' end as status\n    from grouped g\n    left join matches m\n      on m.provider = g.provider and m.provider_match_id = g.provider_match_id\n    left join provider_events pe\n      on pe.provider = g.provider and pe.provider_match_id = g.provider_match_id\n    left join match_scores s\n      on s.provider = g.provider and s.provider_match_id = g.provider_match_id\n    where s.provider_match_id is null\n       or s.htft_code in ('1/2', '2/1', '1/X', '2/X')\n)\n";
+        String baseCte = "with latest_odds as (\n    select distinct on (o.provider, o.provider_match_id, o.bookmaker, o.outcome)\n           o.provider,\n           o.provider_match_id,\n           o.bookmaker,\n           o.outcome,\n           o.decimal_odds,\n           o.snapshot_at\n    from odds_snapshots o\n    where o.provider in :catalogs\n      and o.market = 'HTFT'\n      and o.snapshot_type in ('hourly_pending', 'hourly_settled')\n      and o.outcome in ('1/2', '2/1', '1/X', '2/X')\n    order by o.provider, o.provider_match_id, o.bookmaker, o.outcome,\n             case o.snapshot_type when 'hourly_settled' then 0 else 1 end,\n             o.snapshot_at desc nulls last, o.id desc\n),\ngrouped as (\n    select lo.provider,\n           lo.provider_match_id,\n           lo.bookmaker,\n           max(lo.snapshot_at) as snapshot_at,\n           max(case when lo.outcome = '1/2' then lo.decimal_odds end) as odd_12,\n           max(case when lo.outcome = '2/1' then lo.decimal_odds end) as odd_21,\n           max(case when lo.outcome = '1/X' then lo.decimal_odds end) as odd_1x,\n           max(case when lo.outcome = '2/X' then lo.decimal_odds end) as odd_2x\n    from latest_odds lo\n    where 1=1" + bookmakerClause + "    group by lo.provider, lo.provider_match_id, lo.bookmaker\n),\nfiltered as (\n    select g.*,\n           coalesce(m.competition_code, pe.league_name) as competition_code,\n           coalesce(m.match_date, cast(pe.event_date as date)) as match_date,\n           coalesce(pe.event_date, cast(m.match_date as timestamp)) as kickoff_at,\n           to_char(\n               coalesce(pe.event_date, cast(m.match_date as timestamp)),\n               'YYYY-MM-DD HH24:MI'\n           ) as kickoff_at_text,\n           coalesce(m.home_team, pe.home_team) as home_team,\n           coalesce(m.away_team, pe.away_team) as away_team,\n           s.hthg, s.htag, s.fthg, s.ftag, s.htft_code,\n           case when s.provider_match_id is not null then 'finished' else 'pending' end as status\n    from grouped g\n    left join matches m\n      on m.provider = g.provider and m.provider_match_id = g.provider_match_id\n    left join provider_events pe\n      on pe.provider = g.provider and pe.provider_match_id = g.provider_match_id\n    left join match_scores s\n      on s.provider = g.provider and s.provider_match_id = g.provider_match_id\n    where (s.provider_match_id is not null and s.htft_code in ('1/2', '2/1', '1/X', '2/X'))\n       or (s.provider_match_id is null and lower(coalesce(pe.status, 'pending')) = 'pending')\n)\n";
         HashMap<String, Object> params = new HashMap<String, Object>();
         params.put("catalogs", catalogNames);
         if (bookmaker != null && !bookmaker.isBlank()) {
