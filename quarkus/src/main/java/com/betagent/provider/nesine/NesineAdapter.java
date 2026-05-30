@@ -72,23 +72,18 @@ public class NesineAdapter {
         }
         ArrayList<JsonNode> out = new ArrayList<JsonNode>();
         for (JsonNode row : rows) {
-            if (row.path("S").asInt(-1) != 4) continue;
-            Optional<int[]> ht = NesineAdapter.halfTimeScore(row);
-            Optional<int[]> secondHalf = NesineAdapter.secondHalfScore(row);
-            if (ht.isEmpty() || secondHalf.isEmpty()) continue;
-            int[] htGoals = ht.get();
-            int[] shGoals = secondHalf.get();
-            int fthg = htGoals[0] + shGoals[0];
-            int ftag = htGoals[1] + shGoals[1];
-            out.add(this.toSettledEventNode(row, htGoals[0], htGoals[1], fthg, ftag));
+            Optional<NesineScoreParser.ResolvedScore> score = NesineScoreParser.resolveFinishedRow(row);
+            if (score.isEmpty()) continue;
+            NesineScoreParser.ResolvedScore resolved = score.get();
+            out.add(this.toSettledEventNode(row, resolved.hthg(), resolved.htag(), resolved.fthg(), resolved.ftag()));
         }
         return out;
     }
 
     private JsonNode toSettledEventNode(JsonNode row, int hthg, int htag, int fthg, int ftag) {
         ObjectNode node = this.mapper.createObjectNode();
-        String id = String.valueOf(row.path("C").asLong());
-        node.put("id", id);
+        node.put("id", NesineScoreParser.feedEventId(row));
+        node.put("feed_id", NesineScoreParser.feedId(row));
         node.put("home", NesineAdapter.text(row, "HTTR", "HT"));
         node.put("away", NesineAdapter.text(row, "ATTR", "AT"));
         node.put("status", "finished");
@@ -112,22 +107,6 @@ public class NesineAdapter {
         scores.set("fulltime", (JsonNode)fulltime);
         node.set("scores", (JsonNode)scores);
         return node;
-    }
-
-    private static Optional<int[]> halfTimeScore(JsonNode row) {
-        return NesineAdapter.scoreFromEs(row, 19);
-    }
-
-    private static Optional<int[]> secondHalfScore(JsonNode row) {
-        return NesineAdapter.scoreFromEs(row, 2);
-    }
-
-    private static Optional<int[]> scoreFromEs(JsonNode row, int periodType) {
-        for (JsonNode period : row.path("ES")) {
-            if (period.path("T").asInt(-1) != periodType) continue;
-            return Optional.of(new int[]{period.path("H").asInt(), period.path("A").asInt()});
-        }
-        return Optional.empty();
     }
 
     public JsonNode toOddsPayload(JsonNode bulten, String eventId) {

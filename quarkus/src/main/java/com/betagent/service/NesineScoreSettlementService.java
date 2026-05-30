@@ -18,6 +18,7 @@ package com.betagent.service;
 import com.betagent.config.NesineConfig;
 import com.betagent.persistence.entity.ProviderEventEntity;
 import com.betagent.persistence.repository.ProviderEventRepository;
+import com.betagent.provider.nesine.NesineScoreParser;
 import com.betagent.provider.nesine.NesineAdapter;
 import com.betagent.provider.nesine.NesineLiveScoreService;
 import com.betagent.service.EventParser;
@@ -35,11 +36,9 @@ import jakarta.inject.Inject;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -101,6 +100,22 @@ public class NesineScoreSettlementService {
         return this.syncScores(invalidateCache, trigger);
     }
 
+    public Uni<Map<String, Object>> reconcileFromOddsApi() {
+        if (!this.config.enabled()) {
+            return Uni.createFrom().item(Map.of("status", "disabled", "filled_missing", 0, "replaced_invalid", 0));
+        }
+        return this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(missing -> {
+            HashSet<String> missingIds = new HashSet<>(missing);
+            return this.warehouse.copyScoresFromOddsApi(CATALOG, missingIds).chain(filledMissing -> this.warehouse.findMatchIdsWithInvalidScores(CATALOG, 10000).chain(invalid -> this.warehouse.replaceInvalidScoresFromOddsApi(CATALOG, new HashSet<>(invalid)).map(replacedInvalid -> Map.of(
+                    "status", "ok",
+                    "source", WarehouseService.ODDS_API_CATALOG,
+                    "filled_missing", filledMissing,
+                    "replaced_invalid", replacedInvalid,
+                    "still_missing", Math.max(0, missingIds.size()),
+                    "still_invalid", Math.max(0, invalid.size() - replacedInvalid)))));
+        });
+    }
+
     @WithSession
     @WithTransaction
     public Uni<SettlementResult> settleFromFeed(JsonNode feed) {
@@ -113,107 +128,141 @@ public class NesineScoreSettlementService {
             if (trackedIds.isEmpty()) {
                 return Uni.createFrom().item(SettlementResult.empty());
             }
-            ArrayList<JsonNode> settled = new ArrayList<JsonNode>(this.adapter.toSettledEvents(feed).stream().filter(event -> trackedIds.contains(event.path("id").asText())).toList());
-            settled.addAll(this.matchSettledByTeamName(feed, trackedIds, (List<JsonNode>)settled, (List<ProviderEventEntity>)trackedEvents));
+            List<JsonNode> settled = this.collectSettledEvents(feed, (List<ProviderEventEntity>) trackedEvents, trackedIds);
             return this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(missingBeforeList -> {
                 HashSet<String> missingBefore = new HashSet<>(missingBeforeList);
+                HashSet<String> initiallyMissing = new HashSet<>(missingBeforeList);
                 AtomicInteger fromLiveScore = new AtomicInteger(0);
-                return Multi.createFrom().iterable(settled).onItem().transformToUniAndConcatenate(event -> this.processSettledEvent(event, missingBefore, fromLiveScore)).collect().asList().chain(ignored -> this.warehouse.copyScoresFromOtherProviders(CATALOG, missingBefore)).chain((Integer fromCrossProvider) -> this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(stillMissingList -> {
+                return Multi.createFrom().iterable(settled).onItem().transformToUniAndConcatenate(event -> this.processSettledEvent(event, missingBefore, fromLiveScore)).collect().asList().chain(ignored -> this.warehouse.copyScoresFromOddsApi(CATALOG, missingBefore)).chain((Integer fromOddsApiMissing) -> this.warehouse.findMatchIdsWithInvalidScores(CATALOG, 10000).chain(invalidIds -> this.warehouse.replaceInvalidScoresFromOddsApi(CATALOG, new HashSet<>(invalidIds)).chain((Integer fromOddsApiInvalid) -> this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(stillMissingList -> {
                     HashSet<String> stillMissing = new HashSet<>(stillMissingList);
-                    List<String> newlySettled = missingBefore.stream().filter(id -> !stillMissing.contains(id)).toList();
+                    List<String> newlySettled = initiallyMissing.stream().filter(id -> !stillMissing.contains(id)).toList();
+                    int fromOddsApi = fromOddsApiMissing + fromOddsApiInvalid;
                     return this.warehouse.bridgePendingOddsToSettled(CATALOG, newlySettled).map(bridgedOdds -> {
-                        SettlementResult result = new SettlementResult(fromLiveScore.get(), (int)fromCrossProvider, (int)bridgedOdds, newlySettled.size(), trackedIds.size(), stillMissing.size());
-                        if (fromLiveScore.get() > 0 || fromCrossProvider > 0) {
-                            LOG.infof("Nesine score sync: live=%d cross=%d bridgedOdds=%d missing=%d tracked=%d", new Object[]{fromLiveScore.get(), fromCrossProvider, bridgedOdds, stillMissing.size(), trackedIds.size()});
+                        SettlementResult result = new SettlementResult(fromLiveScore.get(), fromOddsApi, (int) bridgedOdds, newlySettled.size(), trackedIds.size(), stillMissing.size());
+                        if (fromLiveScore.get() > 0 || fromOddsApi > 0) {
+                            LOG.infof("Nesine score sync: live=%d oddsApi=%d bridgedOdds=%d missing=%d tracked=%d",
+                                    fromLiveScore.get(), fromOddsApi, bridgedOdds, stillMissing.size(), trackedIds.size());
                         }
                         return result;
                     });
-                }));
+                }))));
             });
         });
     }
 
     private Uni<Void> processSettledEvent(JsonNode event, Set<String> missingBefore, AtomicInteger fromLiveScore) {
         String id = event.path("id").asText();
-        if (!missingBefore.contains(id)) {
-            return Uni.createFrom().voidItem();
-        }
         Optional<EventParser.MatchBundle> bundle = this.eventParser.toSettledMatch(event, CATALOG);
         if (bundle.isEmpty()) {
             return Uni.createFrom().voidItem();
         }
-        return this.warehouse.upsertProviderEvent(this.eventParser.toProviderEvent(event, CATALOG)).chain(() -> this.warehouse.upsertMatch((EventParser.MatchBundle)bundle.get())).invoke(() -> {
+        EventParser.MatchBundle matchBundle = bundle.get();
+        if (!NesineScoreParser.isValidScore(matchBundle.score().hthg, matchBundle.score().htag, matchBundle.score().fthg, matchBundle.score().ftag)) {
+            LOG.warnf("Skipping invalid Nesine settled score match=%s HT=%d-%d FT=%d-%d",
+                    id, matchBundle.score().hthg, matchBundle.score().htag, matchBundle.score().fthg, matchBundle.score().ftag);
+            return Uni.createFrom().voidItem();
+        }
+        return this.warehouse.upsertProviderEvent(this.eventParser.toProviderEvent(event, CATALOG)).chain(() -> this.warehouse.upsertMatch(matchBundle)).invoke(() -> {
             fromLiveScore.incrementAndGet();
             missingBefore.remove(id);
         });
     }
 
-    private List<JsonNode> matchSettledByTeamName(JsonNode feed, Set<String> trackedIds, List<JsonNode> already, List<ProviderEventEntity> trackedEvents) {
-        HashSet<String> alreadyIds = new HashSet<String>();
-        for (JsonNode jsonNode : already) {
-            alreadyIds.add(jsonNode.path("id").asText());
-        }
-        HashMap<String, ProviderEventEntity> byTeamKey = new HashMap<String, ProviderEventEntity>();
-        for (ProviderEventEntity event : trackedEvents) {
-            if (!trackedIds.contains(event.providerMatchId) || alreadyIds.contains(event.providerMatchId) || event.eventDate == null) continue;
-            byTeamKey.put(NesineScoreSettlementService.teamKey(event.homeTeam, event.awayTeam, event.eventDate.toLocalDate()), event);
-        }
-        if (byTeamKey.isEmpty()) {
-            return List.of();
-        }
-        ArrayList<JsonNode> arrayList = new ArrayList<JsonNode>();
+    private List<JsonNode> collectSettledEvents(JsonNode feed, List<ProviderEventEntity> trackedEvents, Set<String> trackedIds) {
+        HashSet<String> matchedIds = new HashSet<>();
+        ArrayList<JsonNode> settled = new ArrayList<>();
         JsonNode rows = feed.path("d");
         if (!rows.isArray()) {
-            return arrayList;
+            return settled;
         }
         for (JsonNode row : rows) {
-            String away;
-            LocalDate matchDate;
-            String feedId;
-            if (row.path("S").asInt(-1) != 4 || alreadyIds.contains(feedId = String.valueOf(row.path("C").asLong())) || (matchDate = NesineScoreSettlementService.parseFeedDate(row)) == null) continue;
-            String home = NesineScoreSettlementService.text(row, "HTTR", "HT");
-            ProviderEventEntity tracked = (ProviderEventEntity)byTeamKey.get(NesineScoreSettlementService.teamKey(home, away = NesineScoreSettlementService.text(row, "ATTR", "AT"), matchDate));
-            if (tracked == null) continue;
-            Optional<int[]> ht = NesineScoreSettlementService.scoreFromEs(row, 19);
-            Optional<int[]> sh = NesineScoreSettlementService.scoreFromEs(row, 2);
-            if (ht.isEmpty() || sh.isEmpty()) continue;
-            int[] htGoals = ht.get();
-            int[] shGoals = sh.get();
-            ObjectNode node = this.mapper.createObjectNode();
-            node.put("id", tracked.providerMatchId);
-            node.put("home", tracked.homeTeam);
-            node.put("away", tracked.awayTeam);
-            node.put("status", "finished");
-            node.put("date", matchDate.toString());
-            ObjectNode league = this.mapper.createObjectNode();
-            league.put("name", tracked.leagueName != null ? tracked.leagueName : "Football");
-            league.put("slug", tracked.leagueSlug != null ? tracked.leagueSlug : "football");
-            node.set("league", (JsonNode)league);
-            ObjectNode sport = this.mapper.createObjectNode();
-            sport.put("slug", "football");
-            node.set("sport", (JsonNode)sport);
-            ObjectNode scores = this.mapper.createObjectNode();
-            ObjectNode halftime = this.mapper.createObjectNode();
-            halftime.put("home", htGoals[0]);
-            halftime.put("away", htGoals[1]);
-            ObjectNode fulltime = this.mapper.createObjectNode();
-            fulltime.put("home", htGoals[0] + shGoals[0]);
-            fulltime.put("away", htGoals[1] + shGoals[1]);
-            scores.set("halftime", (JsonNode)halftime);
-            scores.set("fulltime", (JsonNode)fulltime);
-            node.set("scores", (JsonNode)scores);
-            arrayList.add((JsonNode)node);
-            alreadyIds.add(tracked.providerMatchId);
+            Optional<NesineScoreParser.ResolvedScore> score = NesineScoreParser.resolveFinishedRow(row);
+            if (score.isEmpty()) {
+                continue;
+            }
+            Optional<ProviderEventEntity> tracked = this.resolveTrackedEvent(row, trackedEvents, trackedIds, matchedIds);
+            if (tracked.isEmpty()) {
+                continue;
+            }
+            ProviderEventEntity event = tracked.get();
+            settled.add(this.toSettledEventNode(event, row, score.get()));
+            matchedIds.add(event.providerMatchId);
         }
-        return arrayList;
+        return settled;
     }
 
-    private static Optional<int[]> scoreFromEs(JsonNode row, int periodType) {
-        for (JsonNode period : row.path("ES")) {
-            if (period.path("T").asInt(-1) != periodType) continue;
-            return Optional.of(new int[]{period.path("H").asInt(), period.path("A").asInt()});
+    private Optional<ProviderEventEntity> resolveTrackedEvent(
+            JsonNode row,
+            List<ProviderEventEntity> trackedEvents,
+            Set<String> trackedIds,
+            Set<String> alreadyMatched) {
+        String feedEventId = NesineScoreParser.feedEventId(row);
+        String feedNid = NesineScoreParser.feedId(row);
+        for (String candidateId : List.of(feedEventId, feedNid)) {
+            if (candidateId == null || candidateId.isBlank() || "0".equals(candidateId)) {
+                continue;
+            }
+            if (!trackedIds.contains(candidateId) || alreadyMatched.contains(candidateId)) {
+                continue;
+            }
+            for (ProviderEventEntity event : trackedEvents) {
+                if (candidateId.equals(event.providerMatchId)) {
+                    return Optional.of(event);
+                }
+            }
         }
-        return Optional.empty();
+        LocalDate matchDate = NesineScoreSettlementService.parseFeedDate(row);
+        if (matchDate == null) {
+            return Optional.empty();
+        }
+        String feedHome = NesineScoreSettlementService.text(row, "HTTR", "HT");
+        String feedAway = NesineScoreSettlementService.text(row, "ATTR", "AT");
+        ProviderEventEntity best = null;
+        for (ProviderEventEntity event : trackedEvents) {
+            if (alreadyMatched.contains(event.providerMatchId) || event.eventDate == null) {
+                continue;
+            }
+            if (!matchDate.equals(event.eventDate.toLocalDate())) {
+                continue;
+            }
+            if (!NesineScoreParser.teamsMatch(event.homeTeam, event.awayTeam, feedHome, feedAway)) {
+                continue;
+            }
+            if (best != null) {
+                LOG.warnf("Ambiguous Nesine team match for feed=%s (%s vs %s); skipping", NesineScoreParser.feedId(row), feedHome, feedAway);
+                return Optional.empty();
+            }
+            best = event;
+        }
+        return Optional.ofNullable(best);
+    }
+
+    private JsonNode toSettledEventNode(ProviderEventEntity tracked, JsonNode row, NesineScoreParser.ResolvedScore score) {
+        ObjectNode node = this.mapper.createObjectNode();
+        node.put("id", tracked.providerMatchId);
+        node.put("home", tracked.homeTeam);
+        node.put("away", tracked.awayTeam);
+        node.put("status", "finished");
+        LocalDate matchDate = NesineScoreSettlementService.parseFeedDate(row);
+        node.put("date", matchDate != null ? matchDate.toString() : tracked.eventDate.toLocalDate().toString());
+        ObjectNode league = this.mapper.createObjectNode();
+        league.put("name", tracked.leagueName != null ? tracked.leagueName : "Football");
+        league.put("slug", tracked.leagueSlug != null ? tracked.leagueSlug : "football");
+        node.set("league", (JsonNode) league);
+        ObjectNode sport = this.mapper.createObjectNode();
+        sport.put("slug", "football");
+        node.set("sport", (JsonNode) sport);
+        ObjectNode scores = this.mapper.createObjectNode();
+        ObjectNode halftime = this.mapper.createObjectNode();
+        halftime.put("home", score.hthg());
+        halftime.put("away", score.htag());
+        ObjectNode fulltime = this.mapper.createObjectNode();
+        fulltime.put("home", score.fthg());
+        fulltime.put("away", score.ftag());
+        scores.set("halftime", (JsonNode) halftime);
+        scores.set("fulltime", (JsonNode) fulltime);
+        node.set("scores", (JsonNode) scores);
+        return node;
     }
 
     private static LocalDate parseFeedDate(JsonNode row) {
@@ -229,16 +278,8 @@ public class NesineScoreSettlementService {
         return null;
     }
 
-    private static String teamKey(String home, String away, LocalDate date) {
-        return NesineScoreSettlementService.normalizeTeam(home) + "|" + NesineScoreSettlementService.normalizeTeam(away) + "|" + String.valueOf(date);
-    }
-
     static String normalizeTeam(String value) {
-        if (value == null || value.isBlank()) {
-            return "";
-        }
-        String normalized = value.toLowerCase(Locale.ROOT).replace('\u0131', 'i').replace('\u0130', 'i').replace('\u015f', 's').replace('\u015e', 's').replace('\u011f', 'g').replace('\u011e', 'g').replace('\u00fc', 'u').replace('\u00dc', 'u').replace('\u00f6', 'o').replace('\u00d6', 'o').replace('\u00e7', 'c').replace('\u00c7', 'c');
-        return normalized.replaceAll("[^a-z0-9]+", "").trim();
+        return NesineScoreParser.normalizeTeam(value);
     }
 
     private static String text(JsonNode node, String ... fields) {

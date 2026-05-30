@@ -552,6 +552,51 @@ export default function App() {
     }
   }
 
+  async function runNesineScoreSync() {
+    setBusy(true);
+    setStatus("Nesine skor senkronu baslatildi...");
+    try {
+      const result = await api<{
+        status: string;
+        from_live_score?: number;
+        from_cross_provider?: number;
+        still_missing?: number;
+        settled_this_run?: number;
+      }>("/nesine/scores/sync", { method: "POST" });
+      const live = result.from_live_score ?? 0;
+      const oddsApi = result.from_cross_provider ?? 0;
+      const missing = result.still_missing ?? 0;
+      await refresh(`Nesine skor sync: live=${live}, odds-api=${oddsApi}, eksik=${missing}`);
+      infoPopup(`Nesine skor sync tamam · live=${live} · odds-api=${oddsApi} · eksik=${missing}`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Nesine skor sync basarisiz");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runNesineScoreReconcile() {
+    setBusy(true);
+    setStatus("Odds-API yedek skor doldurma baslatildi...");
+    try {
+      const result = await api<{
+        status: string;
+        filled_missing?: number;
+        replaced_invalid?: number;
+        still_missing?: number;
+        still_invalid?: number;
+      }>("/nesine/scores/reconcile", { method: "POST" });
+      const filled = result.filled_missing ?? 0;
+      const replaced = result.replaced_invalid ?? 0;
+      await refresh(`Odds-API yedek: doldurulan=${filled}, duzeltilen=${replaced}`);
+      infoPopup(`Odds-API yedek skor · doldurulan=${filled} · duzeltilen=${replaced}`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Odds-API yedek skor basarisiz");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function resetDb() {
     const confirmMessage =
       "DB SIFIRLAMA ONAYI\n\n" +
@@ -656,6 +701,7 @@ export default function App() {
 
   const configured = dashboard?.provider?.configured === true;
   const showKeyWarning = dashboard != null && !configured;
+  const nesineEnabled = dashboard?.provider.nesine_enabled !== false;
   const pendingOddsSections = PENDING_ODDS_SECTIONS.map((section) => ({
     ...section,
     items: sortPredictionsByOdds(predictions.filter(section.match)),
@@ -692,6 +738,30 @@ export default function App() {
           >
             {dashboard?.collector_running ? "Toplaniyor..." : "Manuel Veri Topla"}
           </button>
+          {nesineEnabled && (
+            <>
+              <button
+                className="btn ghost"
+                disabled={busy}
+                onClick={() => {
+                  infoPopup("Bilgi: Nesine canli skor feed senkronu baslatiliyor.");
+                  runNesineScoreSync();
+                }}
+              >
+                Nesine Skor Sync
+              </button>
+              <button
+                className="btn ghost"
+                disabled={busy}
+                onClick={() => {
+                  infoPopup("Bilgi: Eksik/gecersiz Nesine skorlari Odds-API ile dolduruluyor.");
+                  runNesineScoreReconcile();
+                }}
+              >
+                Odds-API Yedek Skor
+              </button>
+            </>
+          )}
           <button
             className="btn ghost"
             disabled={busy}

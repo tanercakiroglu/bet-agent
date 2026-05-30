@@ -28,6 +28,7 @@ import com.betagent.persistence.repository.OddsSnapshotRepository;
 import com.betagent.persistence.repository.ProviderEventRepository;
 import com.betagent.persistence.repository.ProviderSyncRunRepository;
 import com.betagent.service.EventParser;
+import com.betagent.provider.nesine.NesineScoreParser;
 import com.betagent.service.NesineScoreSettlementService;
 import io.quarkus.hibernate.reactive.panache.Panache;
 import io.quarkus.hibernate.reactive.panache.common.WithSession;
@@ -54,6 +55,7 @@ import org.hibernate.reactive.mutiny.Mutiny;
 @ApplicationScoped
 @WithSession
 public class WarehouseService {
+    public static final String ODDS_API_CATALOG = "Odds-API.io";
     public static final String HTFT_SCORES_ONLY_BOOKMAKER = "Skor";
     private static final String ACTIVE_PENDING_EVENT_JOIN = """
             inner join provider_events pe_active
@@ -453,7 +455,7 @@ public class WarehouseService {
             return this.htftScoresOnlyPage(catalogNames, safePage, safeSize, offset);
         }
         String bookmakerClause = bookmaker != null && !bookmaker.isBlank() ? " and lo.bookmaker = :bookmaker" : "";
-        String baseCte = "with latest_odds as (\n    select distinct on (o.provider, o.provider_match_id, o.bookmaker, o.outcome)\n           o.provider,\n           o.provider_match_id,\n           o.bookmaker,\n           o.outcome,\n           o.decimal_odds,\n           o.snapshot_at\n    from odds_snapshots o\n    where o.provider in :catalogs\n      and o.market = 'HTFT'\n      and o.snapshot_type in ('hourly_pending', 'hourly_settled')\n      and o.outcome in ('1/2', '2/1', '1/X', '2/X')\n    order by o.provider, o.provider_match_id, o.bookmaker, o.outcome,\n             case o.snapshot_type when 'hourly_settled' then 0 else 1 end,\n             o.snapshot_at desc nulls last, o.id desc\n),\ngrouped as (\n    select lo.provider,\n           lo.provider_match_id,\n           lo.bookmaker,\n           max(lo.snapshot_at) as snapshot_at,\n           max(case when lo.outcome = '1/2' then lo.decimal_odds end) as odd_12,\n           max(case when lo.outcome = '2/1' then lo.decimal_odds end) as odd_21,\n           max(case when lo.outcome = '1/X' then lo.decimal_odds end) as odd_1x,\n           max(case when lo.outcome = '2/X' then lo.decimal_odds end) as odd_2x\n    from latest_odds lo\n    where 1=1" + bookmakerClause + "    group by lo.provider, lo.provider_match_id, lo.bookmaker\n),\nfiltered as (\n    select g.*,\n           coalesce(m.competition_code, pe.league_name) as competition_code,\n           coalesce(m.match_date, cast(pe.event_date as date)) as match_date,\n           coalesce(pe.event_date, cast(m.match_date as timestamp)) as kickoff_at,\n           to_char(\n               coalesce(pe.event_date, cast(m.match_date as timestamp)),\n               'YYYY-MM-DD HH24:MI'\n           ) as kickoff_at_text,\n           coalesce(m.home_team, pe.home_team) as home_team,\n           coalesce(m.away_team, pe.away_team) as away_team,\n           s.hthg, s.htag, s.fthg, s.ftag, s.htft_code,\n           case when s.provider_match_id is not null then 'finished' else 'pending' end as status\n    from grouped g\n    left join matches m\n      on m.provider = g.provider and m.provider_match_id = g.provider_match_id\n    left join provider_events pe\n      on pe.provider = g.provider and pe.provider_match_id = g.provider_match_id\n    left join match_scores s\n      on s.provider = g.provider and s.provider_match_id = g.provider_match_id\n    where (s.provider_match_id is not null and s.htft_code in ('1/2', '2/1', '1/X', '2/X'))\n       or (s.provider_match_id is null and lower(coalesce(pe.status, 'pending')) = 'pending')\n)\n";
+        String baseCte = "with latest_odds as (\n    select distinct on (o.provider, o.provider_match_id, o.bookmaker, o.outcome)\n           o.provider,\n           o.provider_match_id,\n           o.bookmaker,\n           o.outcome,\n           o.decimal_odds,\n           o.snapshot_at\n    from odds_snapshots o\n    where o.provider in :catalogs\n      and o.market = 'HTFT'\n      and o.snapshot_type in ('hourly_pending', 'hourly_settled')\n      and o.outcome in ('1/2', '2/1', '1/X', '2/X')\n    order by o.provider, o.provider_match_id, o.bookmaker, o.outcome,\n             case o.snapshot_type when 'hourly_settled' then 0 else 1 end,\n             o.snapshot_at desc nulls last, o.id desc\n),\ngrouped as (\n    select lo.provider,\n           lo.provider_match_id,\n           lo.bookmaker,\n           max(lo.snapshot_at) as snapshot_at,\n           max(case when lo.outcome = '1/2' then lo.decimal_odds end) as odd_12,\n           max(case when lo.outcome = '2/1' then lo.decimal_odds end) as odd_21,\n           max(case when lo.outcome = '1/X' then lo.decimal_odds end) as odd_1x,\n           max(case when lo.outcome = '2/X' then lo.decimal_odds end) as odd_2x\n    from latest_odds lo\n    where 1=1" + bookmakerClause + "    group by lo.provider, lo.provider_match_id, lo.bookmaker\n),\nfiltered as (\n    select g.*,\n           coalesce(m.competition_code, pe.league_name) as competition_code,\n           coalesce(m.match_date, cast(pe.event_date as date)) as match_date,\n           coalesce(pe.event_date, cast(m.match_date as timestamp)) as kickoff_at,\n           to_char(\n               coalesce(pe.event_date, cast(m.match_date as timestamp)),\n               'YYYY-MM-DD HH24:MI'\n           ) as kickoff_at_text,\n           coalesce(m.home_team, pe.home_team) as home_team,\n           coalesce(m.away_team, pe.away_team) as away_team,\n           s.hthg, s.htag, s.fthg, s.ftag, s.htft_code,\n           case when s.provider_match_id is not null then 'finished' else 'pending' end as status\n    from grouped g\n    left join matches m\n      on m.provider = g.provider and m.provider_match_id = g.provider_match_id\n    left join provider_events pe\n      on pe.provider = g.provider and pe.provider_match_id = g.provider_match_id\n    left join match_scores s\n      on s.provider = g.provider and s.provider_match_id = g.provider_match_id\n    where (s.provider_match_id is null and lower(coalesce(pe.status, 'pending')) = 'pending')\n       or s.provider_match_id is not null\n)\n";
         HashMap<String, Object> params = new HashMap<String, Object>();
         params.put("catalogs", catalogNames);
         if (bookmaker != null && !bookmaker.isBlank()) {
@@ -653,6 +655,141 @@ public class WarehouseService {
     }
 
     @WithTransaction
+    public Uni<List<String>> findMatchIdsWithInvalidScores(String catalogName, int limit) {
+        return Panache.getSession().flatMap(session -> session.createQuery("""
+                select s.providerMatchId
+                from MatchScoreEntity s
+                where s.provider = :catalog
+                  and exists (
+                    select 1 from OddsSnapshotEntity o
+                    where o.provider = :catalog and o.providerMatchId = s.providerMatchId
+                  )
+                  and (s.fthg < s.hthg or s.ftag < s.htag or s.hthg < 0 or s.htag < 0 or s.fthg < 0 or s.ftag < 0)
+                order by s.providerMatchId desc
+                """, String.class).setParameter("catalog", catalogName).setMaxResults(Math.max(1, limit)).getResultList())
+                .map(rows -> rows.stream().distinct().toList());
+    }
+
+    @WithTransaction
+    public Uni<Integer> copyScoresFromOddsApi(String targetCatalog, Set<String> matchIds) {
+        return this.copyScoresFromOddsApi(targetCatalog, matchIds, false);
+    }
+
+    @WithTransaction
+    public Uni<Integer> replaceInvalidScoresFromOddsApi(String targetCatalog, Set<String> matchIds) {
+        return this.copyScoresFromOddsApi(targetCatalog, matchIds, true);
+    }
+
+    @WithTransaction
+    public Uni<Integer> copyScoresFromOddsApi(String targetCatalog, Set<String> matchIds, boolean replaceInvalidExisting) {
+        if (matchIds.isEmpty()) {
+            return Uni.createFrom().item(0);
+        }
+        HashSet<String> pending = new HashSet<>(matchIds);
+        return Panache.getSession().flatMap(session -> session.createQuery("""
+                select s.providerMatchId, s.provider, s.hthg, s.htag, s.fthg, s.ftag,
+                       s.htResult, s.ftResult, s.htftCode, s.firstHalfKg, s.firstHalfKgTarafCode,
+                       m.homeTeam, m.awayTeam, m.matchDate, m.competitionCode
+                from MatchScoreEntity s
+                join MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId
+                where s.provider = :source
+                """, Object[].class).setParameter("source", ODDS_API_CATALOG).getResultList().chain(candidates -> {
+            HashMap<String, Object[]> byTeamDate = new HashMap<>();
+            for (Object[] row : candidates) {
+                LocalDate date = WarehouseService.rowDate(row[13]);
+                if (date == null) {
+                    continue;
+                }
+                if (!NesineScoreParser.isValidScore((Integer) row[2], (Integer) row[3], (Integer) row[4], (Integer) row[5])) {
+                    continue;
+                }
+                byTeamDate.put(WarehouseService.crossProviderKey(String.valueOf(row[11]), String.valueOf(row[12]), date), row);
+            }
+            return Multi.createFrom().iterable(List.copyOf(pending))
+                    .onItem().transformToUniAndConcatenate(matchId -> this.copySingleScoreFromOddsApi(
+                            targetCatalog, pending, byTeamDate, matchId, replaceInvalidExisting))
+                    .collect().asList()
+                    .map(parts -> parts.stream().mapToInt(Integer::intValue).sum());
+        }));
+    }
+
+    @WithTransaction
+    public Uni<Integer> reconcileScoresFromOtherProviders(String targetCatalog, String sourceCatalog, Set<String> skipMatchIds) {
+        if (skipMatchIds == null) {
+            skipMatchIds = Set.of();
+        }
+        Set<String> skip = skipMatchIds;
+        return Panache.getSession().flatMap(session -> session.createQuery("select s.providerMatchId, s.hthg, s.htag, s.fthg, s.ftag, m.homeTeam, m.awayTeam, m.matchDate\nfrom MatchScoreEntity s\njoin MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId\nwhere s.provider = :target\n  and exists (\n    select 1 from OddsSnapshotEntity o\n    where o.provider = s.provider and o.providerMatchId = s.providerMatchId and o.market = 'HTFT'\n  )\n", Object[].class).setParameter("target", targetCatalog).getResultList().chain(targetRows -> session.createQuery("select s.hthg, s.htag, s.fthg, s.ftag, s.htResult, s.ftResult, s.htftCode, s.firstHalfKg, s.firstHalfKgTarafCode, m.homeTeam, m.awayTeam, m.matchDate\nfrom MatchScoreEntity s\njoin MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId\nwhere s.provider = :source\n", Object[].class).setParameter("source", sourceCatalog).getResultList().chain(sourceRows -> {
+            HashMap<String, Object[]> byTeamDate = new HashMap<>();
+            for (Object[] row : sourceRows) {
+                LocalDate date = WarehouseService.rowDate(row[11]);
+                if (date == null) continue;
+                byTeamDate.put(WarehouseService.crossProviderKey(String.valueOf(row[9]), String.valueOf(row[10]), date), row);
+            }
+            return Multi.createFrom().iterable(targetRows).onItem().transformToUniAndConcatenate(row -> {
+                String matchId = String.valueOf(row[0]);
+                if (skip.contains(matchId)) {
+                    return Uni.createFrom().item(0);
+                }
+                LocalDate date = WarehouseService.rowDate(row[7]);
+                if (date == null) {
+                    return Uni.createFrom().item(0);
+                }
+                Object[] source = byTeamDate.get(WarehouseService.crossProviderKey(String.valueOf(row[5]), String.valueOf(row[6]), date));
+                if (source == null) {
+                    return Uni.createFrom().item(0);
+                }
+                int hthg = (Integer)source[0];
+                int htag = (Integer)source[1];
+                int fthg = (Integer)source[2];
+                int ftag = (Integer)source[3];
+                if (!WarehouseService.scoreSanity(hthg, htag, fthg, ftag)) {
+                    return Uni.createFrom().item(0);
+                }
+                int curHthg = (Integer)row[1];
+                int curHtag = (Integer)row[2];
+                int curFthg = (Integer)row[3];
+                int curFtag = (Integer)row[4];
+                if (curHthg == hthg && curHtag == htag && curFthg == fthg && curFtag == ftag) {
+                    return Uni.createFrom().item(0);
+                }
+                return this.matchScoreRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(existing -> {
+                    if (existing == null) {
+                        return Uni.createFrom().item(0);
+                    }
+                    existing.hthg = hthg;
+                    existing.htag = htag;
+                    existing.fthg = fthg;
+                    existing.ftag = ftag;
+                    existing.htResult = (String)source[4];
+                    existing.ftResult = (String)source[5];
+                    existing.htftCode = (String)source[6];
+                    existing.firstHalfKg = (String)source[7];
+                    existing.firstHalfKgTarafCode = (String)source[8];
+                    return this.providerEventRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(event -> {
+                        if (event != null) {
+                            event.status = "finished";
+                            event.lastSeenAt = LocalDateTime.now();
+                        }
+                        return Uni.createFrom().item(1);
+                    });
+                });
+            }).collect().asList().map(parts -> parts.stream().mapToInt(Integer::intValue).sum());
+        })));
+    }
+
+    private static LocalDate rowDate(Object value) {
+        if (value instanceof LocalDate date) {
+            return date;
+        }
+        return null;
+    }
+
+    private static boolean scoreSanity(int hthg, int htag, int fthg, int ftag) {
+        return fthg >= hthg && ftag >= htag;
+    }
+
+    @WithTransaction
     public Uni<Integer> copyScoresFromOtherProviders(String targetCatalog, Set<String> missingIds) {
         if (missingIds.isEmpty()) {
             return Uni.createFrom().item(0);
@@ -675,6 +812,80 @@ public class WarehouseService {
 
     private static String crossProviderKey(String home, String away, LocalDate date) {
         return NesineScoreSettlementService.normalizeTeam(home) + "|" + NesineScoreSettlementService.normalizeTeam(away) + "|" + String.valueOf(date);
+    }
+
+    private Uni<Integer> copySingleScoreFromOddsApi(
+            String targetCatalog,
+            Set<String> pendingIds,
+            Map<String, Object[]> byTeamDate,
+            String matchId,
+            boolean replaceInvalidExisting) {
+        return this.providerEventRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(event -> {
+            if (event == null || event.eventDate == null) {
+                return Uni.createFrom().item(0);
+            }
+            Object[] source = byTeamDate.get(WarehouseService.crossProviderKey(event.homeTeam, event.awayTeam, event.eventDate.toLocalDate()));
+            if (source == null) {
+                return Uni.createFrom().item(0);
+            }
+            return this.matchScoreRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(existingScore -> {
+                if (existingScore != null) {
+                    if (!replaceInvalidExisting || NesineScoreParser.isValidScore(existingScore.hthg, existingScore.htag, existingScore.fthg, existingScore.ftag)) {
+                        return Uni.createFrom().item(0);
+                    }
+                    existingScore.hthg = (Integer) source[2];
+                    existingScore.htag = (Integer) source[3];
+                    existingScore.fthg = (Integer) source[4];
+                    existingScore.ftag = (Integer) source[5];
+                    existingScore.htResult = (String) source[6];
+                    existingScore.ftResult = (String) source[7];
+                    existingScore.htftCode = (String) source[8];
+                    existingScore.firstHalfKg = (String) source[9];
+                    existingScore.firstHalfKgTarafCode = (String) source[10];
+                    return this.markProviderEventFinished(targetCatalog, matchId).replaceWith(1).invoke(() -> pendingIds.remove(matchId));
+                }
+                MatchEntity match = new MatchEntity();
+                match.provider = targetCatalog;
+                match.providerMatchId = matchId;
+                match.competitionCode = event.competitionCode != null ? event.competitionCode : event.leagueName;
+                match.matchDate = event.eventDate.toLocalDate();
+                match.season = String.valueOf(match.matchDate.getYear());
+                match.homeTeam = event.homeTeam;
+                match.awayTeam = event.awayTeam;
+                return this.matchRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(existingMatch -> {
+                    Uni<Void> upsertMatch = existingMatch != null
+                            ? Uni.createFrom().voidItem()
+                            : this.matchRepository.persist(match).replaceWithVoid();
+                    MatchScoreEntity score = new MatchScoreEntity();
+                    score.provider = targetCatalog;
+                    score.providerMatchId = matchId;
+                    score.hthg = (Integer) source[2];
+                    score.htag = (Integer) source[3];
+                    score.fthg = (Integer) source[4];
+                    score.ftag = (Integer) source[5];
+                    score.htResult = (String) source[6];
+                    score.ftResult = (String) source[7];
+                    score.htftCode = (String) source[8];
+                    score.firstHalfKg = (String) source[9];
+                    score.firstHalfKgTarafCode = (String) source[10];
+                    return upsertMatch
+                            .chain(() -> this.matchScoreRepository.persist(score).replaceWithVoid())
+                            .chain(() -> this.markProviderEventFinished(targetCatalog, matchId))
+                            .replaceWith(1)
+                            .invoke(() -> pendingIds.remove(matchId));
+                });
+            });
+        });
+    }
+
+    private Uni<Void> markProviderEventFinished(String catalog, String matchId) {
+        return this.providerEventRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{catalog, matchId}).firstResult().chain(event -> {
+            if (event != null) {
+                event.status = "finished";
+                event.lastSeenAt = LocalDateTime.now();
+            }
+            return Uni.createFrom().voidItem();
+        });
     }
 
     private Uni<Integer> copySingleScore(String targetCatalog, Set<String> missingIds, Map<String, Object[]> byTeamDate, String matchId) {

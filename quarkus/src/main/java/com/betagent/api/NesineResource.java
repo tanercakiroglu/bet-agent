@@ -41,6 +41,12 @@ public class NesineResource {
     NesineScoreSettlementService scoreSettlementService;
 
     @POST
+    @Path(value="/scores/reconcile")
+    public Uni<Map<String, Object>> reconcileScores() {
+        return this.scoreSettlementService.reconcileFromOddsApi().map(result -> result);
+    }
+
+    @POST
     @Path(value="/scores/sync")
     public Uni<Map<String, Object>> syncScores() {
         return this.scoreSettlementService.syncScores(true, "manual").map(NesineScoreSettlementService.SettlementResult::toMap);
