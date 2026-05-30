@@ -1,0 +1,66 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Python (legacy / local tools)
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Java / Quarkus
+quarkus/target/
+quarkus/docker-app/
+quarkus/Dockerfile.restore
+*.class
+*.jar
+!quarkus/pom.xml
+quarkus/decompiled-src/
+
+# Local data & research outputs
+data/raw/
+data/warehouse/
+*.duckdb
+*.duckdb.wal
+*.parquet
+
+# Docker / OS
+.docker/
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cursor/
+
+# Local debug dumps (large JSON / temp)
+bootstrap-test.json
+nesine-bulten.json
+psg-arsenal-odds.json
+tmp_*
+*.tmp
+.leagues-api.json
+nesine-missing-ids.txt
+.video-frames/

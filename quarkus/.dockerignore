@@ -1,0 +1,6 @@
+target/
+decompiled-src/
+.mvn/
+*.md
+.git
+.gitignore
