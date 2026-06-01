@@ -16,9 +16,14 @@
 package com.betagent.service;
 
 import com.betagent.config.NesineConfig;
+import com.betagent.domain.MatchScore;
+import com.betagent.persistence.entity.MatchScoreEntity;
 import com.betagent.persistence.entity.ProviderEventEntity;
 import com.betagent.persistence.repository.ProviderEventRepository;
+import com.betagent.provider.EventStatus;
+import com.betagent.provider.oddsapiio.OddsApiIoProvider;
 import com.betagent.provider.nesine.NesineScoreParser;
+import com.betagent.util.TeamNameMatcher;
 import com.betagent.provider.nesine.NesineAdapter;
 import com.betagent.provider.nesine.NesineLiveScoreService;
 import com.betagent.service.EventParser;
@@ -70,6 +75,8 @@ public class NesineScoreSettlementService {
     NesineScoreSettlementService self;
     @Inject
     ScoreJobRunService scoreJobRunService;
+    @Inject
+    OddsApiIoProvider oddsApiProvider;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     public boolean isRunning() {
@@ -104,16 +111,50 @@ public class NesineScoreSettlementService {
         if (!this.config.enabled()) {
             return Uni.createFrom().item(Map.of("status", "disabled", "filled_missing", 0, "replaced_invalid", 0));
         }
-        return this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(missing -> {
+        return this.refreshOddsApiSettledScores().chain(refreshedOddsApi -> this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(missing -> {
             HashSet<String> missingIds = new HashSet<>(missing);
-            return this.warehouse.copyScoresFromOddsApi(CATALOG, missingIds).chain(filledMissing -> this.warehouse.findMatchIdsWithInvalidScores(CATALOG, 10000).chain(invalid -> this.warehouse.replaceInvalidScoresFromOddsApi(CATALOG, new HashSet<>(invalid)).map(replacedInvalid -> Map.of(
-                    "status", "ok",
-                    "source", WarehouseService.ODDS_API_CATALOG,
-                    "filled_missing", filledMissing,
-                    "replaced_invalid", replacedInvalid,
-                    "still_missing", Math.max(0, missingIds.size()),
-                    "still_invalid", Math.max(0, invalid.size() - replacedInvalid)))));
-        });
+            return this.warehouse.copyScoresFromOddsApi(CATALOG, missingIds).chain(filledMissing -> this.warehouse.findMatchIdsWithInvalidScores(CATALOG, 10000).chain(invalid -> this.warehouse.replaceInvalidScoresFromOddsApi(CATALOG, new HashSet<>(invalid)).chain(replacedInvalid -> this.warehouse.reconcileScoresFromOtherProviders(CATALOG, WarehouseService.ODDS_API_CATALOG, Set.of()).map(reconciledDivergent -> {
+                int stillMissing = Math.max(0, missingIds.size() - filledMissing);
+                int stillInvalid = Math.max(0, invalid.size() - replacedInvalid);
+                return Map.of(
+                        "status", "ok",
+                        "source", WarehouseService.ODDS_API_CATALOG,
+                        "refreshed_odds_api_settled", refreshedOddsApi,
+                        "filled_missing", filledMissing,
+                        "replaced_invalid", replacedInvalid,
+                        "reconciled_divergent", reconciledDivergent,
+                        "still_missing", stillMissing,
+                        "still_invalid", stillInvalid);
+            }))));
+        }));
+    }
+
+    private Uni<Integer> refreshOddsApiSettledScores() {
+        if (!this.oddsApiProvider.configured()) {
+            return Uni.createFrom().item(0);
+        }
+        return this.oddsApiProvider.fetchEvents(EventStatus.SETTLED).chain(events -> Multi.createFrom().iterable(events)
+                .onItem().transformToUniAndConcatenate(event -> {
+                    Optional<EventParser.MatchBundle> bundle = this.eventParser.toSettledMatch(
+                            event, WarehouseService.ODDS_API_CATALOG);
+                    if (bundle.isEmpty()) {
+                        return Uni.createFrom().item(0);
+                    }
+                    EventParser.MatchBundle matchBundle = bundle.get();
+                    if (!NesineScoreParser.isValidScore(
+                            matchBundle.score().hthg,
+                            matchBundle.score().htag,
+                            matchBundle.score().fthg,
+                            matchBundle.score().ftag)) {
+                        return Uni.createFrom().item(0);
+                    }
+                    return this.warehouse.upsertProviderEvent(
+                                    this.eventParser.toProviderEvent(event, WarehouseService.ODDS_API_CATALOG))
+                            .chain(() -> this.warehouse.upsertMatch(matchBundle))
+                            .replaceWith(1);
+                })
+                .collect().asList()
+                .map(parts -> parts.stream().mapToInt(Integer::intValue).sum()));
     }
 
     @WithSession
@@ -129,43 +170,152 @@ public class NesineScoreSettlementService {
                 return Uni.createFrom().item(SettlementResult.empty());
             }
             List<JsonNode> settled = this.collectSettledEvents(feed, (List<ProviderEventEntity>) trackedEvents, trackedIds);
-            return this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(missingBeforeList -> {
+            return this.refreshOddsApiSettledScores().chain(ignored -> this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(missingBeforeList -> {
                 HashSet<String> missingBefore = new HashSet<>(missingBeforeList);
                 HashSet<String> initiallyMissing = new HashSet<>(missingBeforeList);
                 AtomicInteger fromLiveScore = new AtomicInteger(0);
-                return Multi.createFrom().iterable(settled).onItem().transformToUniAndConcatenate(event -> this.processSettledEvent(event, missingBefore, fromLiveScore)).collect().asList().chain(ignored -> this.warehouse.copyScoresFromOddsApi(CATALOG, missingBefore)).chain((Integer fromOddsApiMissing) -> this.warehouse.findMatchIdsWithInvalidScores(CATALOG, 10000).chain(invalidIds -> this.warehouse.replaceInvalidScoresFromOddsApi(CATALOG, new HashSet<>(invalidIds)).chain((Integer fromOddsApiInvalid) -> this.warehouse.findMatchIdsMissingScores(CATALOG, 10000).chain(stillMissingList -> {
-                    HashSet<String> stillMissing = new HashSet<>(stillMissingList);
-                    List<String> newlySettled = initiallyMissing.stream().filter(id -> !stillMissing.contains(id)).toList();
-                    int fromOddsApi = fromOddsApiMissing + fromOddsApiInvalid;
-                    return this.warehouse.bridgePendingOddsToSettled(CATALOG, newlySettled).map(bridgedOdds -> {
-                        SettlementResult result = new SettlementResult(fromLiveScore.get(), fromOddsApi, (int) bridgedOdds, newlySettled.size(), trackedIds.size(), stillMissing.size());
-                        if (fromLiveScore.get() > 0 || fromOddsApi > 0) {
-                            LOG.infof("Nesine score sync: live=%d oddsApi=%d bridgedOdds=%d missing=%d tracked=%d",
-                                    fromLiveScore.get(), fromOddsApi, bridgedOdds, stillMissing.size(), trackedIds.size());
-                        }
-                        return result;
-                    });
-                }))));
-            });
+                AtomicInteger skippedUnverified = new AtomicInteger(0);
+                return Multi.createFrom().iterable(settled)
+                        .onItem().transformToUniAndConcatenate(event -> this.processSettledEvent(
+                                event, missingBefore, fromLiveScore, skippedUnverified))
+                        .collect().asList()
+                        .chain(done -> {
+                            if (skippedUnverified.get() > 0) {
+                                LOG.infof(
+                                        "Nesine HT/FT: %d mac Odds-API ile dogrulanamadi, skor yazilmadi (reconcile bekliyor)",
+                                        skippedUnverified.get());
+                            }
+                            return this.completeSettlement(trackedIds, initiallyMissing, fromLiveScore, missingBefore);
+                        });
+            }));
         });
     }
 
-    private Uni<Void> processSettledEvent(JsonNode event, Set<String> missingBefore, AtomicInteger fromLiveScore) {
+    private Uni<SettlementResult> completeSettlement(
+            Set<String> trackedIds,
+            HashSet<String> initiallyMissing,
+            AtomicInteger fromLiveScore,
+            HashSet<String> missingBefore) {
+        return this.warehouse.copyScoresFromOddsApi(CATALOG, missingBefore)
+                .chain(fromOddsApiMissing -> this.warehouse.findMatchIdsWithInvalidScores(CATALOG, 10000)
+                        .chain(invalidIds -> this.warehouse.replaceInvalidScoresFromOddsApi(CATALOG, new HashSet<>(invalidIds))
+                                .chain(fromOddsApiInvalid -> this.warehouse.reconcileScoresFromOtherProviders(
+                                        CATALOG, WarehouseService.ODDS_API_CATALOG, Set.of())
+                                        .chain(fromOddsApiDivergent -> this.warehouse.findMatchIdsMissingScores(CATALOG, 10000)
+                                                .chain(stillMissingList -> {
+                                                    HashSet<String> stillMissing = new HashSet<>(stillMissingList);
+                                                    List<String> newlySettled = initiallyMissing.stream()
+                                                            .filter(id -> !stillMissing.contains(id))
+                                                            .toList();
+                                                    int fromOddsApi = fromOddsApiMissing + fromOddsApiInvalid + fromOddsApiDivergent;
+                                                    return this.warehouse.bridgePendingOddsToSettled(CATALOG, newlySettled)
+                                                            .map(bridgedOdds -> {
+                                                                SettlementResult result = new SettlementResult(
+                                                                        fromLiveScore.get(),
+                                                                        fromOddsApi,
+                                                                        bridgedOdds.intValue(),
+                                                                        newlySettled.size(),
+                                                                        trackedIds.size(),
+                                                                        stillMissing.size());
+                                                                if (fromLiveScore.get() > 0 || fromOddsApi > 0) {
+                                                                    LOG.infof(
+                                                                            "Nesine score sync: live=%d oddsApi=%d bridgedOdds=%d missing=%d tracked=%d",
+                                                                            fromLiveScore.get(),
+                                                                            fromOddsApi,
+                                                                            bridgedOdds,
+                                                                            stillMissing.size(),
+                                                                            trackedIds.size());
+                                                                }
+                                                                return result;
+                                                            });
+                                                })))));
+    }
+
+    private Uni<Void> processSettledEvent(
+            JsonNode event,
+            Set<String> missingBefore,
+            AtomicInteger fromLiveScore,
+            AtomicInteger skippedUnverified) {
         String id = event.path("id").asText();
         Optional<EventParser.MatchBundle> bundle = this.eventParser.toSettledMatch(event, CATALOG);
         if (bundle.isEmpty()) {
             return Uni.createFrom().voidItem();
         }
         EventParser.MatchBundle matchBundle = bundle.get();
-        if (!NesineScoreParser.isValidScore(matchBundle.score().hthg, matchBundle.score().htag, matchBundle.score().fthg, matchBundle.score().ftag)) {
+        MatchScoreEntity nesineScore = matchBundle.score();
+        if (!NesineScoreParser.isValidScore(nesineScore.hthg, nesineScore.htag, nesineScore.fthg, nesineScore.ftag)) {
             LOG.warnf("Skipping invalid Nesine settled score match=%s HT=%d-%d FT=%d-%d",
-                    id, matchBundle.score().hthg, matchBundle.score().htag, matchBundle.score().fthg, matchBundle.score().ftag);
+                    id, nesineScore.hthg, nesineScore.htag, nesineScore.fthg, nesineScore.ftag);
             return Uni.createFrom().voidItem();
         }
-        return this.warehouse.upsertProviderEvent(this.eventParser.toProviderEvent(event, CATALOG)).chain(() -> this.warehouse.upsertMatch(matchBundle)).invoke(() -> {
-            fromLiveScore.incrementAndGet();
-            missingBefore.remove(id);
-        });
+        return this.warehouse.findScoreByTeamDate(
+                        WarehouseService.ODDS_API_CATALOG,
+                        matchBundle.match().homeTeam,
+                        matchBundle.match().awayTeam,
+                        matchBundle.match().matchDate)
+                .chain(oddsApiScore -> {
+                    if (oddsApiScore.isEmpty()) {
+                        skippedUnverified.incrementAndGet();
+                        LOG.debugf(
+                                "Nesine HT/FT skipped (no Odds-API reference) match=%s %s vs %s HT %d-%d FT %d-%d",
+                                id,
+                                matchBundle.match().homeTeam,
+                                matchBundle.match().awayTeam,
+                                nesineScore.hthg,
+                                nesineScore.htag,
+                                nesineScore.fthg,
+                                nesineScore.ftag);
+                        return Uni.createFrom().voidItem();
+                    }
+                    MatchScoreEntity reference = oddsApiScore.get();
+                    if (NesineScoreSettlementService.scoresEqual(nesineScore, reference)) {
+                        LOG.debugf(
+                                "Nesine HT/FT verified by Odds-API match=%s -> %s",
+                                id,
+                                reference.htftCode);
+                    } else {
+                        LOG.warnf(
+                                "Nesine HT/FT mismatch match=%s Nesine HT %d-%d FT %d-%d (%s) vs Odds-API HT %d-%d FT %d-%d (%s) — writing Odds-API",
+                                id,
+                                nesineScore.hthg,
+                                nesineScore.htag,
+                                nesineScore.fthg,
+                                nesineScore.ftag,
+                                nesineScore.htftCode,
+                                reference.hthg,
+                                reference.htag,
+                                reference.fthg,
+                                reference.ftag,
+                                reference.htftCode);
+                        NesineScoreSettlementService.copyScoreFields(nesineScore, reference);
+                    }
+                    return this.warehouse.upsertProviderEvent(this.eventParser.toProviderEvent(event, CATALOG))
+                            .chain(() -> this.warehouse.upsertMatch(matchBundle))
+                            .invoke(() -> {
+                                fromLiveScore.incrementAndGet();
+                                missingBefore.remove(id);
+                            });
+                });
+    }
+
+    private static boolean scoresEqual(MatchScoreEntity left, MatchScoreEntity right) {
+        return left.hthg == right.hthg
+                && left.htag == right.htag
+                && left.fthg == right.fthg
+                && left.ftag == right.ftag;
+    }
+
+    private static void copyScoreFields(MatchScoreEntity target, MatchScoreEntity source) {
+        target.hthg = source.hthg;
+        target.htag = source.htag;
+        target.fthg = source.fthg;
+        target.ftag = source.ftag;
+        MatchScore computed = new MatchScore(source.hthg, source.htag, source.fthg, source.ftag);
+        target.htResult = computed.htResult();
+        target.ftResult = computed.ftResult();
+        target.htftCode = computed.htftCode();
+        target.firstHalfKg = computed.firstHalfKg();
+        target.firstHalfKgTarafCode = computed.firstHalfKgTarafCode();
     }
 
     private List<JsonNode> collectSettledEvents(JsonNode feed, List<ProviderEventEntity> trackedEvents, Set<String> trackedIds) {
@@ -279,7 +429,7 @@ public class NesineScoreSettlementService {
     }
 
     static String normalizeTeam(String value) {
-        return NesineScoreParser.normalizeTeam(value);
+        return TeamNameMatcher.normalize(value);
     }
 
     private static String text(JsonNode node, String ... fields) {

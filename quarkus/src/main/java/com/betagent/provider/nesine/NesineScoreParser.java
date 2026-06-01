@@ -1,15 +1,15 @@
 package com.betagent.provider.nesine;
 
+import com.betagent.util.TeamNameMatcher;
 import com.fasterxml.jackson.databind.JsonNode;
-import java.util.Locale;
 import java.util.Optional;
 import org.jboss.logging.Logger;
 
 /**
  * Parses Nesine live-score ES periods.
  * <p>
- * Verified against live feed samples: T=19 is half-time, T=1 is full-time.
- * T=2 is NOT reliably "second-half goals only" (often duplicates HT or FT).
+ * T=1 is full-time, T=19 is half-time, T=2 is second-half goals when consistent.
+ * When T=19 duplicates T=1 but T=2 adds 2H goals, HT is derived as FT minus T=2.
  */
 public final class NesineScoreParser {
     private static final Logger LOG = Logger.getLogger(NesineScoreParser.class);
@@ -33,32 +33,67 @@ public final class NesineScoreParser {
             return Optional.empty();
         }
         String feedId = feedId(row);
-        Optional<int[]> halfTime = periodGoals(row, PERIOD_HALF_TIME);
         Optional<int[]> fullTime = periodGoals(row, PERIOD_FULL_TIME);
-        if (halfTime.isEmpty() || fullTime.isEmpty()) {
-            LOG.debugf("Rejecting Nesine score feed=%s: missing T=19 or T=1", feedId);
+        if (fullTime.isEmpty()) {
+            LOG.debugf("Rejecting Nesine score feed=%s: missing T=1", feedId);
             return Optional.empty();
         }
-        int hthg = halfTime.get()[0];
-        int htag = halfTime.get()[1];
         int fthg = fullTime.get()[0];
         int ftag = fullTime.get()[1];
+        Optional<int[]> halfTime = periodGoals(row, PERIOD_HALF_TIME);
+        Optional<int[]> secondHalf = periodGoals(row, PERIOD_SECOND_HALF);
+
+        int hthg;
+        int htag;
+        boolean secondHalfConsistent = false;
+
+        if (halfTime.isEmpty()) {
+            if (secondHalf.isEmpty()) {
+                LOG.debugf("Rejecting Nesine score feed=%s: missing T=19 and T=2", feedId);
+                return Optional.empty();
+            }
+            int[] sh = secondHalf.get();
+            if (fthg < sh[0] || ftag < sh[1]) {
+                LOG.debugf("Rejecting Nesine score feed=%s: T=2 exceeds T=1", feedId);
+                return Optional.empty();
+            }
+            hthg = fthg - sh[0];
+            htag = ftag - sh[1];
+            secondHalfConsistent = true;
+        } else {
+            hthg = halfTime.get()[0];
+            htag = halfTime.get()[1];
+            if (secondHalf.isPresent()) {
+                int[] sh = secondHalf.get();
+                secondHalfConsistent = hthg + sh[0] == fthg && htag + sh[1] == ftag;
+                if (!secondHalfConsistent && fthg >= sh[0] && ftag >= sh[1]) {
+                    int derivedH = fthg - sh[0];
+                    int derivedA = ftag - sh[1];
+                    boolean derivedValid = isValidScore(derivedH, derivedA, fthg, ftag);
+                    boolean htEqualsFt = hthg == fthg && htag == ftag;
+                    boolean derivedFromSecondHalf = derivedValid
+                            && sh[0] > 0
+                            && (derivedH < hthg || derivedA < htag);
+                    if (derivedFromSecondHalf && htEqualsFt) {
+                        LOG.infof(
+                                "Nesine HT corrected from T=2 feed=%s T19=%d-%d T1=%d-%d T2=%d-%d -> HT %d-%d",
+                                feedId, hthg, htag, fthg, ftag, sh[0], sh[1], derivedH, derivedA);
+                        hthg = derivedH;
+                        htag = derivedA;
+                        secondHalfConsistent = true;
+                    }
+                }
+                if (!secondHalfConsistent) {
+                    LOG.debugf(
+                            "Nesine T=2 ignored feed=%s HT=%d-%d T1=%d-%d T2=%d-%d",
+                            feedId, hthg, htag, fthg, ftag, sh[0], sh[1]);
+                }
+            }
+        }
+
         if (!isValidScore(hthg, htag, fthg, ftag)) {
             LOG.warnf("Rejecting invalid Nesine score feed=%s HT=%d-%d FT=%d-%d", feedId, hthg, htag, fthg, ftag);
             return Optional.empty();
-        }
-        boolean secondHalfConsistent = true;
-        Optional<int[]> secondHalf = periodGoals(row, PERIOD_SECOND_HALF);
-        if (secondHalf.isPresent()) {
-            int[] sh = secondHalf.get();
-            int calcHome = hthg + sh[0];
-            int calcAway = htag + sh[1];
-            secondHalfConsistent = calcHome == fthg && calcAway == ftag;
-            if (!secondHalfConsistent) {
-                LOG.debugf(
-                        "Nesine T=2 ignored feed=%s HT=%d-%d T1=%d-%d T2=%d-%d (T2 is not 2H-only in this feed)",
-                        feedId, hthg, htag, fthg, ftag, sh[0], sh[1]);
-            }
         }
         return Optional.of(new ResolvedScore(hthg, htag, fthg, ftag, feedId, secondHalfConsistent));
     }
@@ -89,36 +124,11 @@ public final class NesineScoreParser {
     }
 
     public static boolean teamsMatch(String trackedHome, String trackedAway, String feedHome, String feedAway) {
-        return sideMatches(trackedHome, feedHome) && sideMatches(trackedAway, feedAway);
-    }
-
-    static boolean sideMatches(String tracked, String feed) {
-        String left = normalizeTeam(tracked);
-        String right = normalizeTeam(feed);
-        if (left.isEmpty() || right.isEmpty()) {
-            return false;
-        }
-        if (left.equals(right)) {
-            return true;
-        }
-        if (left.length() >= 4 && right.length() >= 4) {
-            return left.startsWith(right) || right.startsWith(left);
-        }
-        return false;
+        return TeamNameMatcher.teamsMatch(trackedHome, trackedAway, feedHome, feedAway);
     }
 
     public static String normalizeTeam(String value) {
-        if (value == null || value.isBlank()) {
-            return "";
-        }
-        String normalized = value.toLowerCase(Locale.ROOT)
-                .replace('\u0131', 'i').replace('\u0130', 'i')
-                .replace('\u015f', 's').replace('\u015e', 's')
-                .replace('\u011f', 'g').replace('\u011e', 'g')
-                .replace('\u00fc', 'u').replace('\u00dc', 'u')
-                .replace('\u00f6', 'o').replace('\u00d6', 'o')
-                .replace('\u00e7', 'c').replace('\u00c7', 'c');
-        return normalized.replaceAll("[^a-z0-9]+", "").trim();
+        return TeamNameMatcher.normalize(value);
     }
 
     private static Optional<int[]> periodGoals(JsonNode row, int periodType) {

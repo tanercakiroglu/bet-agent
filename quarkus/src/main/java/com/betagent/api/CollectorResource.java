@@ -87,7 +87,7 @@ public class CollectorResource {
         OddsDataProvider primary = this.providerRegistry.active();
         List<Map<String, Object>> providerInfos = this.buildProviderInfos(providers);
         Map<String, Object> providerInfo = this.buildPrimaryProviderInfo(primary, providers);
-        return Multi.createFrom().iterable(catalogs).onItem().transformToUniAndConcatenate(this.warehouseService::dashboard).collect().asList().chain(parts -> this.warehouseService.aggregatedDataQuality(catalogs).chain(quality -> this.syncRunRepository.findLatestAcross(catalogs).chain(latest -> this.predictionSettingsService.resolve(primary.catalogName()).chain(PredictionSettingsService::toMap).chain(settings -> this.isAnyCollectorRunActive(catalogs).map(running -> {
+        return Multi.createFrom().iterable(catalogs).onItem().transformToUniAndConcatenate(this.warehouseService::dashboard).collect().asList().chain(parts -> this.warehouseService.aggregatedDataQuality(catalogs).chain(quality -> this.warehouseService.countMatchesMissingScores(catalogs).chain(missingCount -> this.warehouseService.listMatchesMissingScores(catalogs, 80).chain(missingScores -> this.syncRunRepository.findLatestAcross(catalogs).chain(latest -> this.predictionSettingsService.resolve(primary.catalogName()).chain(PredictionSettingsService::toMap).chain(settings -> this.isAnyCollectorRunActive(catalogs).map(running -> {
             long totalMatches = parts.stream().mapToLong(part -> ((Number)part.getOrDefault("matches", 0L)).longValue()).sum();
             long totalHourlySnapshots = parts.stream().mapToLong(part -> ((Number)part.getOrDefault("hourly_snapshots", 0L)).longValue()).sum();
             long totalOddsSnapshots = parts.stream().mapToLong(part -> ((Number)part.getOrDefault("odds_snapshots", 0L)).longValue()).sum();
@@ -96,13 +96,15 @@ public class CollectorResource {
             payload.put("hourly_snapshots", totalHourlySnapshots);
             payload.put("odds_snapshots", totalOddsSnapshots);
             payload.put("data_quality", quality);
+            payload.put("missing_scores_count", missingCount);
+            payload.put("missing_scores", missingScores);
             payload.put("provider", providerInfo);
             payload.put("providers", providerInfos);
             payload.put("collector_running", running);
             payload.put("collector", latest.orElse(null));
             payload.put("prediction_settings", settings);
             return payload;
-        })))));
+        })))))));
     }
 
     @POST

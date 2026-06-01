@@ -48,6 +48,21 @@ class NesineScoreParserTest {
         assertFalse(NesineScoreParser.teamsMatch("PSG", "Arsenal", "Lyon", "Arsenal"));
     }
 
+    @Test
+    void correctsHalfTimeWhenT19DuplicatesFullTimeButSecondHalfAddsGoals() throws Exception {
+        JsonNode row = mapper.readTree("""
+                {"S":4,"C":999001,"NID":999001,"HTTR":"Ostersunds FK","ATTR":"Orebro SK",
+                 "ES":[{"T":1,"H":3,"A":2},{"T":19,"H":3,"A":2},{"T":2,"H":2,"A":0}]}
+                """);
+        Optional<NesineScoreParser.ResolvedScore> score = NesineScoreParser.resolveFinishedRow(row);
+        assertTrue(score.isPresent());
+        assertEquals(1, score.get().hthg());
+        assertEquals(2, score.get().htag());
+        assertEquals(3, score.get().fthg());
+        assertEquals(2, score.get().ftag());
+        assertTrue(score.get().secondHalfConsistent());
+    }
+
     private JsonNode sampleRow(long eventId) throws Exception {
         for (JsonNode row : mapper.readTree("""
                 {"d":[

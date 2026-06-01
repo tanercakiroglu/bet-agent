@@ -29,7 +29,7 @@ import com.betagent.persistence.repository.ProviderEventRepository;
 import com.betagent.persistence.repository.ProviderSyncRunRepository;
 import com.betagent.service.EventParser;
 import com.betagent.provider.nesine.NesineScoreParser;
-import com.betagent.service.NesineScoreSettlementService;
+import com.betagent.util.TeamNameMatcher;
 import io.quarkus.hibernate.reactive.panache.Panache;
 import io.quarkus.hibernate.reactive.panache.common.WithSession;
 import io.quarkus.hibernate.reactive.panache.common.WithTransaction;
@@ -275,6 +275,78 @@ public class WarehouseService {
             it.put("first_half_kg_taraf_code", r[13]);
             it.put("provider", r[14]);
             items.add(it);
+            }
+            return items;
+        });
+    }
+
+    public Uni<Long> countMatchesMissingScores(List<String> catalogs) {
+        if (catalogs == null || catalogs.isEmpty()) {
+            return Uni.createFrom().item(0L);
+        }
+        return ReactiveQueries.countNative("""
+                select count(distinct pe.provider_match_id)
+                from provider_events pe
+                where pe.provider in (?1)
+                  and exists (
+                    select 1 from odds_snapshots o
+                    where o.provider = pe.provider
+                      and o.provider_match_id = pe.provider_match_id
+                  )
+                  and not exists (
+                    select 1 from match_scores s
+                    where s.provider = pe.provider
+                      and s.provider_match_id = pe.provider_match_id
+                  )
+                """, catalogs);
+    }
+
+    public Uni<List<Map<String, Object>>> listMatchesMissingScores(List<String> catalogs, int limit) {
+        if (catalogs == null || catalogs.isEmpty()) {
+            return Uni.createFrom().item(List.of());
+        }
+        int capped = Math.max(1, Math.min(limit, 500));
+        return ReactiveQueries.rowsNative("""
+                select pe.provider,
+                       pe.provider_match_id,
+                       pe.home_team,
+                       pe.away_team,
+                       pe.event_date,
+                       coalesce(pe.competition_code, pe.league_name),
+                       pe.status,
+                       exists (
+                         select 1 from odds_snapshots o
+                         where o.provider = pe.provider
+                           and o.provider_match_id = pe.provider_match_id
+                           and o.market = 'HTFT'
+                       ) as has_htft_odds
+                from provider_events pe
+                where pe.provider in (?1)
+                  and exists (
+                    select 1 from odds_snapshots o
+                    where o.provider = pe.provider
+                      and o.provider_match_id = pe.provider_match_id
+                  )
+                  and not exists (
+                    select 1 from match_scores s
+                    where s.provider = pe.provider
+                      and s.provider_match_id = pe.provider_match_id
+                  )
+                order by pe.event_date desc nulls last, pe.provider_match_id desc
+                limit ?2
+                """, catalogs, capped).map(rows -> {
+            ArrayList<Map<String, Object>> items = new ArrayList<>();
+            for (Object[] row : rows) {
+                LinkedHashMap<String, Object> item = new LinkedHashMap<>();
+                item.put("provider", row[0]);
+                item.put("provider_match_id", row[1]);
+                item.put("home_team", row[2]);
+                item.put("away_team", row[3]);
+                item.put("match_date", row[4]);
+                item.put("competition_code", row[5]);
+                item.put("status", row[6]);
+                item.put("has_htft_odds", row[7] instanceof Boolean b ? b : Boolean.TRUE.equals(row[7]));
+                items.add(item);
             }
             return items;
         });
@@ -693,8 +765,8 @@ public class WarehouseService {
                 from MatchScoreEntity s
                 join MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId
                 where s.provider = :source
-                """, Object[].class).setParameter("source", ODDS_API_CATALOG).getResultList().chain(candidates -> {
-            HashMap<String, Object[]> byTeamDate = new HashMap<>();
+                """, Object[].class).setParameter("source", ODDS_API_CATALOG)                .getResultList().chain(candidates -> {
+            ArrayList<Object[]> sourceRows = new ArrayList<>();
             for (Object[] row : candidates) {
                 LocalDate date = WarehouseService.rowDate(row[13]);
                 if (date == null) {
@@ -703,11 +775,11 @@ public class WarehouseService {
                 if (!NesineScoreParser.isValidScore((Integer) row[2], (Integer) row[3], (Integer) row[4], (Integer) row[5])) {
                     continue;
                 }
-                byTeamDate.put(WarehouseService.crossProviderKey(String.valueOf(row[11]), String.valueOf(row[12]), date), row);
+                sourceRows.add(row);
             }
             return Multi.createFrom().iterable(List.copyOf(pending))
                     .onItem().transformToUniAndConcatenate(matchId -> this.copySingleScoreFromOddsApi(
-                            targetCatalog, pending, byTeamDate, matchId, replaceInvalidExisting))
+                            targetCatalog, pending, sourceRows, matchId, replaceInvalidExisting))
                     .collect().asList()
                     .map(parts -> parts.stream().mapToInt(Integer::intValue).sum());
         }));
@@ -720,11 +792,12 @@ public class WarehouseService {
         }
         Set<String> skip = skipMatchIds;
         return Panache.getSession().flatMap(session -> session.createQuery("select s.providerMatchId, s.hthg, s.htag, s.fthg, s.ftag, m.homeTeam, m.awayTeam, m.matchDate\nfrom MatchScoreEntity s\njoin MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId\nwhere s.provider = :target\n  and exists (\n    select 1 from OddsSnapshotEntity o\n    where o.provider = s.provider and o.providerMatchId = s.providerMatchId and o.market = 'HTFT'\n  )\n", Object[].class).setParameter("target", targetCatalog).getResultList().chain(targetRows -> session.createQuery("select s.hthg, s.htag, s.fthg, s.ftag, s.htResult, s.ftResult, s.htftCode, s.firstHalfKg, s.firstHalfKgTarafCode, m.homeTeam, m.awayTeam, m.matchDate\nfrom MatchScoreEntity s\njoin MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId\nwhere s.provider = :source\n", Object[].class).setParameter("source", sourceCatalog).getResultList().chain(sourceRows -> {
-            HashMap<String, Object[]> byTeamDate = new HashMap<>();
+            ArrayList<Object[]> sourceCandidates = new ArrayList<>();
             for (Object[] row : sourceRows) {
-                LocalDate date = WarehouseService.rowDate(row[11]);
-                if (date == null) continue;
-                byTeamDate.put(WarehouseService.crossProviderKey(String.valueOf(row[9]), String.valueOf(row[10]), date), row);
+                if (WarehouseService.rowDate(row[11]) == null) {
+                    continue;
+                }
+                sourceCandidates.add(row);
             }
             return Multi.createFrom().iterable(targetRows).onItem().transformToUniAndConcatenate(row -> {
                 String matchId = String.valueOf(row[0]);
@@ -735,15 +808,23 @@ public class WarehouseService {
                 if (date == null) {
                     return Uni.createFrom().item(0);
                 }
-                Object[] source = byTeamDate.get(WarehouseService.crossProviderKey(String.valueOf(row[5]), String.valueOf(row[6]), date));
-                if (source == null) {
+                Optional<Object[]> sourceOpt = TeamNameMatcher.findBestByTeamsAndDate(
+                        sourceCandidates,
+                        candidate -> String.valueOf(candidate[9]),
+                        candidate -> String.valueOf(candidate[10]),
+                        candidate -> WarehouseService.rowDate(candidate[11]),
+                        String.valueOf(row[5]),
+                        String.valueOf(row[6]),
+                        date);
+                if (sourceOpt.isEmpty()) {
                     return Uni.createFrom().item(0);
                 }
+                Object[] source = sourceOpt.get();
                 int hthg = (Integer)source[0];
                 int htag = (Integer)source[1];
                 int fthg = (Integer)source[2];
                 int ftag = (Integer)source[3];
-                if (!WarehouseService.scoreSanity(hthg, htag, fthg, ftag)) {
+                if (!NesineScoreParser.isValidScore(hthg, htag, fthg, ftag)) {
                     return Uni.createFrom().item(0);
                 }
                 int curHthg = (Integer)row[1];
@@ -795,39 +876,74 @@ public class WarehouseService {
             return Uni.createFrom().item(0);
         }
         return Panache.getSession().flatMap(session -> session.createQuery("select s.providerMatchId, s.provider, s.hthg, s.htag, s.fthg, s.ftag,\n       s.htResult, s.ftResult, s.htftCode, s.firstHalfKg, s.firstHalfKgTarafCode,\n       m.homeTeam, m.awayTeam, m.matchDate, m.competitionCode\nfrom MatchScoreEntity s\njoin MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId\nwhere s.provider <> :target\n", Object[].class).setParameter("target", targetCatalog).getResultList().chain(candidates -> {
-            HashMap<String, Object[]> byTeamDate = new HashMap<String, Object[]>();
+            ArrayList<Object[]> sourceRows = new ArrayList<>();
             for (Object[] row : candidates) {
-                LocalDate ld;
-                LocalDate date;
-                String home = String.valueOf(row[11]);
-                String away = String.valueOf(row[12]);
-                Object patt0$temp = row[13];
-                LocalDate localDate = date = patt0$temp instanceof LocalDate ? (ld = (LocalDate)patt0$temp) : null;
-                if (date == null) continue;
-                byTeamDate.put(WarehouseService.crossProviderKey(home, away, date), row);
+                if (WarehouseService.rowDate(row[13]) == null) {
+                    continue;
+                }
+                sourceRows.add(row);
             }
-            return Multi.createFrom().iterable(List.copyOf(missingIds)).onItem().transformToUniAndConcatenate(matchId -> this.copySingleScore(targetCatalog, missingIds, (Map<String, Object[]>)byTeamDate, (String)matchId)).collect().asList().map(parts -> parts.stream().mapToInt(Integer::intValue).sum());
+            return Multi.createFrom().iterable(List.copyOf(missingIds)).onItem().transformToUniAndConcatenate(matchId -> this.copySingleScore(targetCatalog, missingIds, sourceRows, matchId)).collect().asList().map(parts -> parts.stream().mapToInt(Integer::intValue).sum());
         }));
     }
 
-    private static String crossProviderKey(String home, String away, LocalDate date) {
-        return NesineScoreSettlementService.normalizeTeam(home) + "|" + NesineScoreSettlementService.normalizeTeam(away) + "|" + String.valueOf(date);
+    @WithTransaction
+    public Uni<Optional<MatchScoreEntity>> findScoreByTeamDate(
+            String sourceCatalog, String homeTeam, String awayTeam, LocalDate matchDate) {
+        if (matchDate == null || homeTeam == null || awayTeam == null) {
+            return Uni.createFrom().item(Optional.empty());
+        }
+        return Panache.getSession().flatMap(session -> session.createQuery("""
+                select s, m.homeTeam, m.awayTeam, m.matchDate
+                from MatchScoreEntity s
+                join MatchEntity m on m.provider = s.provider and m.providerMatchId = s.providerMatchId
+                where s.provider = :source
+                """, Object[].class)
+                .setParameter("source", sourceCatalog)
+                .getResultList()
+                .map(rows -> {
+                    ArrayList<Object[]> candidates = new ArrayList<>();
+                    for (Object[] row : rows) {
+                        MatchScoreEntity score = (MatchScoreEntity) row[0];
+                        if (!NesineScoreParser.isValidScore(score.hthg, score.htag, score.fthg, score.ftag)) {
+                            continue;
+                        }
+                        candidates.add(row);
+                    }
+                    Optional<Object[]> best = TeamNameMatcher.findBestByTeamsAndDate(
+                            candidates,
+                            candidate -> String.valueOf(candidate[1]),
+                            candidate -> String.valueOf(candidate[2]),
+                            candidate -> WarehouseService.rowDate(candidate[3]),
+                            homeTeam,
+                            awayTeam,
+                            matchDate);
+                    return best.map(candidate -> (MatchScoreEntity) candidate[0]);
+                }));
     }
 
     private Uni<Integer> copySingleScoreFromOddsApi(
             String targetCatalog,
             Set<String> pendingIds,
-            Map<String, Object[]> byTeamDate,
+            List<Object[]> sourceRows,
             String matchId,
             boolean replaceInvalidExisting) {
         return this.providerEventRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(event -> {
             if (event == null || event.eventDate == null) {
                 return Uni.createFrom().item(0);
             }
-            Object[] source = byTeamDate.get(WarehouseService.crossProviderKey(event.homeTeam, event.awayTeam, event.eventDate.toLocalDate()));
-            if (source == null) {
+            Optional<Object[]> sourceOpt = TeamNameMatcher.findBestByTeamsAndDate(
+                    sourceRows,
+                    row -> String.valueOf(row[11]),
+                    row -> String.valueOf(row[12]),
+                    row -> WarehouseService.rowDate(row[13]),
+                    event.homeTeam,
+                    event.awayTeam,
+                    event.eventDate.toLocalDate());
+            if (sourceOpt.isEmpty()) {
                 return Uni.createFrom().item(0);
             }
+            Object[] source = sourceOpt.get();
             return this.matchScoreRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(existingScore -> {
                 if (existingScore != null) {
                     if (!replaceInvalidExisting || NesineScoreParser.isValidScore(existingScore.hthg, existingScore.htag, existingScore.fthg, existingScore.ftag)) {
@@ -888,15 +1004,23 @@ public class WarehouseService {
         });
     }
 
-    private Uni<Integer> copySingleScore(String targetCatalog, Set<String> missingIds, Map<String, Object[]> byTeamDate, String matchId) {
+    private Uni<Integer> copySingleScore(String targetCatalog, Set<String> missingIds, List<Object[]> sourceRows, String matchId) {
         return this.providerEventRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(event -> {
             if (event == null || event.eventDate == null) {
                 return Uni.createFrom().item(0);
             }
-            Object[] source = (Object[])byTeamDate.get(WarehouseService.crossProviderKey(event.homeTeam, event.awayTeam, event.eventDate.toLocalDate()));
-            if (source == null) {
+            Optional<Object[]> sourceOpt = TeamNameMatcher.findBestByTeamsAndDate(
+                    sourceRows,
+                    row -> String.valueOf(row[11]),
+                    row -> String.valueOf(row[12]),
+                    row -> WarehouseService.rowDate(row[13]),
+                    event.homeTeam,
+                    event.awayTeam,
+                    event.eventDate.toLocalDate());
+            if (sourceOpt.isEmpty()) {
                 return Uni.createFrom().item(0);
             }
+            Object[] source = sourceOpt.get();
             return this.matchScoreRepository.find("provider = ?1 and providerMatchId = ?2", new Object[]{targetCatalog, matchId}).firstResult().chain(existingScore -> {
                 if (existingScore != null) {
                     return Uni.createFrom().item(0);

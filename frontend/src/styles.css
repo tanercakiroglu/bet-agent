@@ -65,6 +65,10 @@ h1 { margin: 0.4rem 0; font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1; }
 .stats .pulse { border-color: rgba(56, 189, 248, 0.55); box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.25); }
 
 .qualityPanel { margin-top: 0.25rem; }
+.missingScoresPanel { margin-top: 0.75rem; }
+.missingScoresEmpty { margin: 0.5rem 0 0; }
+.missingScoresTable td:nth-child(3) { min-width: 12rem; }
+.tableScroll { overflow-x: auto; }
 .providerStrip {
   display: flex;
   gap: 0.75rem;

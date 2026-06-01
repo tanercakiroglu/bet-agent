@@ -43,11 +43,24 @@ type DataQuality = {
   by_provider?: (DataQuality & { provider: string })[];
 };
 
+type MissingScoreMatch = {
+  provider: string;
+  provider_match_id: string;
+  home_team: string;
+  away_team: string;
+  match_date: string;
+  competition_code?: string;
+  status?: string;
+  has_htft_odds?: boolean;
+};
+
 type Dashboard = {
   matches: number;
   hourly_snapshots: number;
   odds_snapshots: number;
   collector_running: boolean;
+  missing_scores_count?: number;
+  missing_scores?: MissingScoreMatch[];
   data_quality?: DataQuality;
   prediction_settings?: PredictionSettings;
   provider: {
@@ -328,6 +341,12 @@ function formatKickoff(row: HtftMatchRow) {
 function formatDt(value: string | null) {
   if (!value) return "-";
   return value.replace("T", " ").slice(0, 16);
+}
+
+function formatMatchDate(value?: string | null) {
+  if (!value) return "—";
+  const normalized = String(value).replace("T", " ");
+  return normalized.length >= 16 ? normalized.slice(0, 16) : normalized.slice(0, 10);
 }
 
 function leagueTotal(league: LeagueStat) {
@@ -892,6 +911,50 @@ export default function App() {
           )}
         </section>
       )}
+
+      <section className="panel missingScoresPanel">
+        <div className="panelHead">
+          <h2>Skor yazilmayan maclar</h2>
+          <span className="meta">
+            Odds kaydi var, skor yok · toplam {dashboard?.missing_scores_count ?? 0}
+            {(dashboard?.missing_scores_count ?? 0) > (dashboard?.missing_scores?.length ?? 0)
+              ? ` (ilk ${dashboard?.missing_scores?.length ?? 0} gosteriliyor)`
+              : ""}
+          </span>
+        </div>
+        {(dashboard?.missing_scores?.length ?? 0) === 0 ? (
+          <p className="meta missingScoresEmpty">Tum takip edilen maclarda skor mevcut veya henuz odds yok.</p>
+        ) : (
+          <div className="tableScroll">
+            <table className="leagueTable missingScoresTable">
+              <thead>
+                <tr>
+                  <th>Provider</th>
+                  <th>Tarih</th>
+                  <th>Mac</th>
+                  <th>Lig</th>
+                  <th>Durum</th>
+                  <th>HT/FT odds</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dashboard!.missing_scores!.map((row) => (
+                  <tr key={`${row.provider}-${row.provider_match_id}`}>
+                    <td>{row.provider}</td>
+                    <td>{formatMatchDate(row.match_date)}</td>
+                    <td>
+                      {row.home_team} vs {row.away_team}
+                    </td>
+                    <td>{row.competition_code ?? "—"}</td>
+                    <td>{row.status ?? "—"}</td>
+                    <td>{row.has_htft_odds ? "evet" : "hayir"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <div className="tabs">
         <button
