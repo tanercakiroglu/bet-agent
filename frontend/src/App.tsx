@@ -266,7 +266,7 @@ function sortPredictionsByOdds(items: Prediction[]) {
   return [...items].sort((a, b) => b.decimal_odds - a.decimal_odds);
 }
 
-type Tab = "predictions" | "history" | "scores" | "htft";
+type Tab = "predictions" | "history" | "scores" | "htft" | "missing";
 
 function formatOdd(value?: number) {
   return value != null && value > 0 ? value.toFixed(2) : "—";
@@ -912,50 +912,6 @@ export default function App() {
         </section>
       )}
 
-      <section className="panel missingScoresPanel">
-        <div className="panelHead">
-          <h2>Skor yazilmayan maclar</h2>
-          <span className="meta">
-            Odds kaydi var, skor yok · toplam {dashboard?.missing_scores_count ?? 0}
-            {(dashboard?.missing_scores_count ?? 0) > (dashboard?.missing_scores?.length ?? 0)
-              ? ` (ilk ${dashboard?.missing_scores?.length ?? 0} gosteriliyor)`
-              : ""}
-          </span>
-        </div>
-        {(dashboard?.missing_scores?.length ?? 0) === 0 ? (
-          <p className="meta missingScoresEmpty">Tum takip edilen maclarda skor mevcut veya henuz odds yok.</p>
-        ) : (
-          <div className="tableScroll">
-            <table className="leagueTable missingScoresTable">
-              <thead>
-                <tr>
-                  <th>Provider</th>
-                  <th>Tarih</th>
-                  <th>Mac</th>
-                  <th>Lig</th>
-                  <th>Durum</th>
-                  <th>HT/FT odds</th>
-                </tr>
-              </thead>
-              <tbody>
-                {dashboard!.missing_scores!.map((row) => (
-                  <tr key={`${row.provider}-${row.provider_match_id}`}>
-                    <td>{row.provider}</td>
-                    <td>{formatMatchDate(row.match_date)}</td>
-                    <td>
-                      {row.home_team} vs {row.away_team}
-                    </td>
-                    <td>{row.competition_code ?? "—"}</td>
-                    <td>{row.status ?? "—"}</td>
-                    <td>{row.has_htft_odds ? "evet" : "hayir"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
       <div className="tabs">
         <button
           className={tab === "history" ? "tab active" : "tab"}
@@ -992,6 +948,18 @@ export default function App() {
           }}
         >
           Skorlar
+        </button>
+        <button
+          className={tab === "missing" ? "tab active" : "tab"}
+          onClick={() => {
+            infoPopup("Bilgi: Skor yazilmayan maclar sekmesine geciliyor.");
+            setTab("missing");
+          }}
+        >
+          Skor Eksik
+          {(dashboard?.missing_scores_count ?? 0) > 0 && (
+            <span className="tabBadge">{dashboard?.missing_scores_count}</span>
+          )}
         </button>
       </div>
 
@@ -1436,6 +1404,56 @@ export default function App() {
                 ))}
               </tbody>
             </table>
+          )}
+        </section>
+      )}
+
+      {tab === "missing" && (
+        <section className="panel missingScoresPanel">
+          <div className="panelHead">
+            <h2>Skor yazilmayan maclar</h2>
+            <span className="meta">
+              Odds kaydi var, skor yok · toplam {dashboard?.missing_scores_count ?? 0}
+              {(dashboard?.missing_scores_count ?? 0) > (dashboard?.missing_scores?.length ?? 0)
+                ? ` (ilk ${dashboard?.missing_scores?.length ?? 0} gosteriliyor)`
+                : ""}
+            </span>
+          </div>
+          <p className="hint">
+            Nesine skor sync yalnizca Odds-API ile dogrulanan maclari yazar. Eksikler icin Odds-API
+            reconcile veya referans mac kullan.
+          </p>
+          {(dashboard?.missing_scores?.length ?? 0) === 0 ? (
+            <p className="empty">Tum takip edilen maclarda skor mevcut veya henuz odds yok.</p>
+          ) : (
+            <div className="tableScroll">
+              <table className="leagueTable missingScoresTable">
+                <thead>
+                  <tr>
+                    <th>Provider</th>
+                    <th>Tarih</th>
+                    <th>Mac</th>
+                    <th>Lig</th>
+                    <th>Durum</th>
+                    <th>HT/FT odds</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dashboard!.missing_scores!.map((row) => (
+                    <tr key={`${row.provider}-${row.provider_match_id}`}>
+                      <td>{row.provider}</td>
+                      <td>{formatMatchDate(row.match_date)}</td>
+                      <td>
+                        {row.home_team} vs {row.away_team}
+                      </td>
+                      <td>{row.competition_code ?? "—"}</td>
+                      <td>{row.status ?? "—"}</td>
+                      <td>{row.has_htft_odds ? "evet" : "hayir"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
       )}

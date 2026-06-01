@@ -65,7 +65,7 @@ h1 { margin: 0.4rem 0; font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1; }
 .stats .pulse { border-color: rgba(56, 189, 248, 0.55); box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.25); }
 
 .qualityPanel { margin-top: 0.25rem; }
-.missingScoresPanel { margin-top: 0.75rem; }
+.missingScoresPanel { margin-top: 0; }
 .missingScoresEmpty { margin: 0.5rem 0 0; }
 .missingScoresTable td:nth-child(3) { min-width: 12rem; }
 .tableScroll { overflow-x: auto; }
@@ -319,6 +319,9 @@ h1 { margin: 0.4rem 0; font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1; }
 
 .tabs { display: flex; gap: 0.5rem; margin-top: 1rem; }
 .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   border: 1px solid var(--line);
   background: rgba(8, 12, 24, 0.5);
   color: var(--muted);
@@ -331,6 +334,19 @@ h1 { margin: 0.4rem 0; font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1; }
   color: var(--text);
   border-color: rgba(56, 189, 248, 0.45);
   background: rgba(56, 189, 248, 0.12);
+}
+.tabBadge {
+  display: inline-block;
+  min-width: 1.25rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
+  color: var(--text);
+  background: rgba(251, 113, 133, 0.25);
+  border: 1px solid rgba(251, 113, 133, 0.45);
 }
 
 .jobList { display: grid; gap: 0.75rem; margin-top: 1rem; }
