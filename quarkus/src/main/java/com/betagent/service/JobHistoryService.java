@@ -14,6 +14,7 @@ package com.betagent.service;
 import com.betagent.persistence.entity.ProviderSyncRunEntity;
 import com.betagent.persistence.repository.ProviderSyncRunRepository;
 import com.betagent.provider.OddsProviderRegistry;
+import com.betagent.service.ScoreJobRunService;
 import com.betagent.service.model.LeagueStat;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,6 +41,42 @@ public class JobHistoryService {
 
     public Uni<List<Map<String, Object>>> list(int limit) {
         return this.syncRunRepository.findRecentAll(limit).map(runs -> runs.stream().map(this::toItem).toList());
+    }
+
+    public Uni<Map<String, Object>> latestRepairSummary() {
+        return this.syncRunRepository
+                .findLatest(ScoreJobRunService.NESINE_REPAIR_PROVIDER)
+                .map(opt -> opt.map(this::toRepairSummary).orElseGet(this::emptyRepairSummary));
+    }
+
+    private Map<String, Object> emptyRepairSummary() {
+        LinkedHashMap<String, Object> summary = new LinkedHashMap<>();
+        summary.put("has_run", false);
+        summary.put("corrections_count", 0);
+        summary.put("corrections", List.of());
+        return summary;
+    }
+
+    private Map<String, Object> toRepairSummary(ProviderSyncRunEntity run) {
+        Map<String, Object> item = this.toItem(run);
+        Map<String, Object> optimization = this.parseOptimizationStats(run.optimizationStatsJson);
+        LinkedHashMap<String, Object> summary = new LinkedHashMap<>();
+        summary.put("has_run", true);
+        summary.put("run_id", item.get("run_id"));
+        summary.put("status", item.get("status"));
+        summary.put("started_at", item.get("started_at"));
+        summary.put("finished_at", item.get("finished_at"));
+        summary.put("trigger", optimization.getOrDefault("trigger", "scheduled"));
+        summary.put("repaired", optimization.getOrDefault("repaired", 0));
+        summary.put("cleared_suspicious", optimization.getOrDefault("cleared_suspicious", 0));
+        summary.put("from_live_score", optimization.getOrDefault("from_live_score", 0));
+        summary.put("from_cross_provider", optimization.getOrDefault("from_cross_provider", 0));
+        summary.put("reference_corrected", optimization.getOrDefault("reference_corrected", 0));
+        summary.put("still_missing", optimization.getOrDefault("still_missing", 0));
+        summary.put("corrections_count", optimization.getOrDefault("corrections_count", 0));
+        Object corrections = optimization.get("corrections");
+        summary.put("corrections", corrections instanceof List<?> list ? list : List.of());
+        return summary;
     }
 
     private Map<String, Object> toItem(ProviderSyncRunEntity run) {

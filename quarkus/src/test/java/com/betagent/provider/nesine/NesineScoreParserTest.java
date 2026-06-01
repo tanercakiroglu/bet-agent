@@ -49,6 +49,45 @@ class NesineScoreParserTest {
     }
 
     @Test
+    void rejectsSuspiciousHalfTimeDuplicateWithoutCorrection() throws Exception {
+        JsonNode row = mapper.readTree("""
+                {"S":4,"C":999002,"NID":999002,"HTTR":"Brezilya","ATTR":"Panama",
+                 "ES":[{"T":1,"H":6,"A":2},{"T":19,"H":6,"A":2}]}
+                """);
+        assertTrue(NesineScoreParser.resolveFinishedRow(row).isEmpty());
+    }
+
+    @Test
+    void correctsBrazilStyleHalfTimeFromSecondHalfGoals() throws Exception {
+        JsonNode row = mapper.readTree("""
+                {"S":4,"C":999003,"NID":999003,"HTTR":"Brezilya","ATTR":"Panama",
+                 "ES":[{"T":1,"H":6,"A":2},{"T":19,"H":6,"A":2},{"T":2,"H":4,"A":1}]}
+                """);
+        Optional<NesineScoreParser.ResolvedScore> score = NesineScoreParser.resolveFinishedRow(row);
+        assertTrue(score.isPresent());
+        assertEquals(2, score.get().hthg());
+        assertEquals(1, score.get().htag());
+        assertEquals(6, score.get().fthg());
+        assertEquals(2, score.get().ftag());
+        assertTrue(score.get().trustworthy());
+    }
+
+    @Test
+    void correctsCruzeiroStyleHalfTimeFromSecondHalfGoals() throws Exception {
+        JsonNode row = mapper.readTree("""
+                {"S":4,"C":999004,"NID":999004,"HTTR":"Cruzeiro MG","ATTR":"Fluminense",
+                 "ES":[{"T":1,"H":1,"A":1},{"T":19,"H":1,"A":1},{"T":2,"H":1,"A":0}]}
+                """);
+        Optional<NesineScoreParser.ResolvedScore> score = NesineScoreParser.resolveFinishedRow(row);
+        assertTrue(score.isPresent());
+        assertEquals(0, score.get().hthg());
+        assertEquals(1, score.get().htag());
+        assertEquals(1, score.get().fthg());
+        assertEquals(1, score.get().ftag());
+        assertTrue(score.get().trustworthy());
+    }
+
+    @Test
     void correctsHalfTimeWhenT19DuplicatesFullTimeButSecondHalfAddsGoals() throws Exception {
         JsonNode row = mapper.readTree("""
                 {"S":4,"C":999001,"NID":999001,"HTTR":"Ostersunds FK","ATTR":"Orebro SK",

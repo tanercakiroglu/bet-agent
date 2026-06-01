@@ -66,6 +66,8 @@ h1 { margin: 0.4rem 0; font-size: clamp(2rem, 5vw, 3.2rem); line-height: 1; }
 
 .qualityPanel { margin-top: 0.25rem; }
 .missingScoresPanel { margin-top: 0; }
+.repairPanel { margin-top: 0.75rem; }
+.repairTable td:nth-child(2) { min-width: 11rem; }
 .missingScoresEmpty { margin: 0.5rem 0 0; }
 .missingScoresTable td:nth-child(3) { min-width: 12rem; }
 .tableScroll { overflow-x: auto; }

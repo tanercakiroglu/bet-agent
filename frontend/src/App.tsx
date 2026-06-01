@@ -54,6 +54,32 @@ type MissingScoreMatch = {
   has_htft_odds?: boolean;
 };
 
+type ScoreRepairCorrection = {
+  match_id: string;
+  home_team: string;
+  away_team: string;
+  match_date: string;
+  method: string;
+  before: string;
+  after: string;
+};
+
+type NesineScoreRepairSummary = {
+  has_run: boolean;
+  status?: string;
+  started_at?: string;
+  finished_at?: string;
+  trigger?: string;
+  repaired?: number;
+  cleared_suspicious?: number;
+  from_live_score?: number;
+  from_cross_provider?: number;
+  reference_corrected?: number;
+  still_missing?: number;
+  corrections_count?: number;
+  corrections?: ScoreRepairCorrection[];
+};
+
 type Dashboard = {
   matches: number;
   hourly_snapshots: number;
@@ -61,6 +87,7 @@ type Dashboard = {
   collector_running: boolean;
   missing_scores_count?: number;
   missing_scores?: MissingScoreMatch[];
+  nesine_score_repair?: NesineScoreRepairSummary;
   data_quality?: DataQuality;
   prediction_settings?: PredictionSettings;
   provider: {
@@ -134,6 +161,11 @@ type JobHistoryItem = {
     settled_this_run?: number;
     tracked_total?: number;
     still_missing?: number;
+    repaired?: number;
+    cleared_suspicious?: number;
+    reference_corrected?: number;
+    corrections_count?: number;
+    corrections?: ScoreRepairCorrection[];
     odds_fetch_mode?: string;
     odds_candidates?: number;
     odds_skipped_recent?: number;
@@ -145,6 +177,36 @@ type JobHistoryItem = {
 
 function isScoreJob(job: JobHistoryItem) {
   return job.optimization?.job_type === "nesine_score";
+}
+
+function isRepairJob(job: JobHistoryItem) {
+  return job.optimization?.job_type === "nesine_score_repair";
+}
+
+function repairMethodLabel(method: string) {
+  switch (method) {
+    case "odds_api":
+      return "Odds-API";
+    case "live_feed":
+      return "Canli feed";
+    case "reference":
+      return "Referans";
+    case "cleared_suspicious":
+      return "Supheli silindi";
+    default:
+      return method;
+  }
+}
+
+function repairJobSummary(job: JobHistoryItem) {
+  const opt = job.optimization;
+  if (!opt) return "";
+  const parts = [
+    opt.repaired ? `${opt.repaired} duzeltme` : null,
+    opt.cleared_suspicious ? `${opt.cleared_suspicious} supheli silindi` : null,
+    opt.corrections_count != null ? `${opt.corrections_count} kayit` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : "Degisiklik yok";
 }
 
 function scoreJobSummary(job: JobHistoryItem) {
@@ -594,6 +656,31 @@ export default function App() {
     }
   }
 
+  async function runNesineScoreRepair() {
+    setBusy(true);
+    setStatus("Nesine skor onarimi baslatildi...");
+    try {
+      const result = await api<{
+        status: string;
+        from_live_score?: number;
+        from_cross_provider?: number;
+        still_missing?: number;
+        cleared_suspicious?: number;
+        repaired?: number;
+        corrections_count?: number;
+      }>("/nesine/scores/repair", { method: "POST" });
+      const repaired = result.repaired ?? 0;
+      const cleared = result.cleared_suspicious ?? 0;
+      const corrections = result.corrections_count ?? 0;
+      await refresh(`Nesine onarim: ${repaired} duzeltme, ${corrections} kayit`);
+      infoPopup(`Skor onarim tamam · duzeltme=${repaired} · kayit=${corrections} · supheli silinen=${cleared}`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "Nesine skor onarim basarisiz");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runNesineScoreReconcile() {
     setBusy(true);
     setStatus("Odds-API yedek skor doldurma baslatildi...");
@@ -773,6 +860,16 @@ export default function App() {
                 className="btn ghost"
                 disabled={busy}
                 onClick={() => {
+                  infoPopup("Bilgi: Supheli skorlar silinip canli feed yeniden isleniyor.");
+                  runNesineScoreRepair();
+                }}
+              >
+                Nesine Skor Onar
+              </button>
+              <button
+                className="btn ghost"
+                disabled={busy}
+                onClick={() => {
                   infoPopup("Bilgi: Eksik/gecersiz Nesine skorlari Odds-API ile dolduruluyor.");
                   runNesineScoreReconcile();
                 }}
@@ -832,6 +929,66 @@ export default function App() {
           <strong>{dashboard?.collector?.status ?? "bekliyor"}</strong>
         </article>
       </section>
+
+      {dashboard?.nesine_score_repair && (
+        <section className="panel repairPanel">
+          <div className="panelHead">
+            <h2>Son Nesine skor onarimi</h2>
+            <span className="meta">
+              Her saat :20 ve :40 · cron{" "}
+              {dashboard.nesine_score_repair.has_run
+                ? `${dashboard.nesine_score_repair.repaired ?? 0} duzeltme · ${dashboard.nesine_score_repair.corrections_count ?? 0} kayit`
+                : "henuz calismadi"}
+            </span>
+          </div>
+          {!dashboard.nesine_score_repair.has_run ? (
+            <p className="empty">Ilk zamanlanmis onarim bekleniyor veya job kapali.</p>
+          ) : (
+            <>
+              <p className="hint">
+                Son calisma: {formatDt(dashboard.nesine_score_repair.finished_at ?? null)} (
+                {dashboard.nesine_score_repair.trigger ?? "scheduled"}) · durum{" "}
+                {dashboard.nesine_score_repair.status} · canli feed{" "}
+                {dashboard.nesine_score_repair.from_live_score ?? 0} · capraz{" "}
+                {dashboard.nesine_score_repair.from_cross_provider ?? 0} · referans{" "}
+                {dashboard.nesine_score_repair.reference_corrected ?? 0} · supheli silinen{" "}
+                {dashboard.nesine_score_repair.cleared_suspicious ?? 0} · hala eksik{" "}
+                {dashboard.nesine_score_repair.still_missing ?? "—"}
+              </p>
+              {(dashboard.nesine_score_repair.corrections?.length ?? 0) === 0 ? (
+                <p className="meta">Son onarimda mac skoru degismedi.</p>
+              ) : (
+                <div className="tableScroll">
+                  <table className="leagueTable repairTable">
+                    <thead>
+                      <tr>
+                        <th>Tarih</th>
+                        <th>Mac</th>
+                        <th>Yontem</th>
+                        <th>Once</th>
+                        <th>Sonra</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dashboard.nesine_score_repair.corrections!.map((row) => (
+                        <tr key={`${row.match_id}-${row.method}-${row.after}`}>
+                          <td>{formatMatchDate(row.match_date)}</td>
+                          <td>
+                            {row.home_team} vs {row.away_team}
+                          </td>
+                          <td>{repairMethodLabel(row.method)}</td>
+                          <td>{row.before}</td>
+                          <td>{row.after}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      )}
 
       {dashboard?.data_quality && (
         <section className="panel qualityPanel">
@@ -967,7 +1124,7 @@ export default function App() {
         <section className="panel">
           <h2>Job Gecmisi</h2>
           <p className="hint">
-            Saatlik odds collector ve Nesine skor job (10 dk) calismalarini buradan izle.
+            Saatlik odds collector, Nesine skor sync (10 dk) ve skor onarim (:20/:40) calismalarini buradan izle.
           </p>
           {jobHistory.length === 0 && <p className="empty">Henuz job yok. Manuel veri topla.</p>}
           <div className="jobList">
@@ -988,7 +1145,11 @@ export default function App() {
                       <strong>{formatDt(job.started_at)}</strong>
                       {job.provider && <span className="providerBadge">{job.provider}</span>}
                       <span className="meta">
-                        {isScoreJob(job) ? (
+                        {isRepairJob(job) ? (
+                          <>
+                            Skor onarim · {job.optimization?.trigger ?? "scheduled"} · {repairJobSummary(job)}
+                          </>
+                        ) : isScoreJob(job) ? (
                           <>
                             Skor job · {job.optimization?.trigger ?? "scheduled"} · {scoreJobSummary(job)}
                           </>
@@ -1007,7 +1168,49 @@ export default function App() {
                   </button>
                   {open && (
                     <div className="jobBody">
-                      {isScoreJob(job) ? (
+                      {isRepairJob(job) ? (
+                        <>
+                          <div className="jobMeta">
+                            <span>Tetikleyici: {job.optimization?.trigger ?? "-"}</span>
+                            <span>Duzeltme: {job.optimization?.repaired ?? 0}</span>
+                            <span>Supheli silinen: {job.optimization?.cleared_suspicious ?? 0}</span>
+                            <span>Canli feed: {job.optimization?.from_live_score ?? 0}</span>
+                            <span>Odds-API: {job.optimization?.from_cross_provider ?? 0}</span>
+                            <span>Referans: {job.optimization?.reference_corrected ?? 0}</span>
+                            <span>Eksik: {job.optimization?.still_missing ?? 0}</span>
+                            <span>Bitti: {formatDt(job.finished_at)}</span>
+                          </div>
+                          {Array.isArray(job.optimization?.corrections) &&
+                          job.optimization.corrections.length > 0 ? (
+                            <table className="leagueTable repairTable">
+                              <thead>
+                                <tr>
+                                  <th>Tarih</th>
+                                  <th>Mac</th>
+                                  <th>Yontem</th>
+                                  <th>Once</th>
+                                  <th>Sonra</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(job.optimization.corrections as ScoreRepairCorrection[]).map((row) => (
+                                  <tr key={`${row.match_id}-${row.method}`}>
+                                    <td>{formatMatchDate(row.match_date)}</td>
+                                    <td>
+                                      {row.home_team} vs {row.away_team}
+                                    </td>
+                                    <td>{repairMethodLabel(row.method)}</td>
+                                    <td>{row.before}</td>
+                                    <td>{row.after}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          ) : (
+                            <p className="empty">Bu onarimda mac skoru degismedi.</p>
+                          )}
+                        </>
+                      ) : isScoreJob(job) ? (
                         <div className="jobMeta">
                           <span>Tetikleyici: {job.optimization?.trigger ?? "-"}</span>
                           <span>Takip: {job.optimization?.tracked_total ?? job.events_seen}</span>
@@ -1420,8 +1623,8 @@ export default function App() {
             </span>
           </div>
           <p className="hint">
-            Nesine skor sync yalnizca Odds-API ile dogrulanan maclari yazar. Eksikler icin Odds-API
-            reconcile veya referans mac kullan.
+            Supheli IY=MS kopyalari yazilmaz. Guvenilir parse veya Odds-API varsa skor guncellenir.
+            Hatali kayitlar icin ustte &quot;Nesine Skor Onar&quot; kullan.
           </p>
           {(dashboard?.missing_scores?.length ?? 0) === 0 ? (
             <p className="empty">Tum takip edilen maclarda skor mevcut veya henuz odds yok.</p>

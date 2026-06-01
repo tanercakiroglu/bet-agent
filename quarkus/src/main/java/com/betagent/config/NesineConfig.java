@@ -34,5 +34,11 @@ public interface NesineConfig {
 
     @WithDefault(value="true")
     public boolean scoreBackfillOnStartup();
+
+    @WithDefault(value="true")
+    public boolean scoreRepairJobEnabled();
+
+    @WithDefault(value="0 20,40 * ? * *")
+    public String scoreRepairCron();
 }
 

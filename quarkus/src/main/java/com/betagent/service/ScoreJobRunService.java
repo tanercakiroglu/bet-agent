@@ -22,12 +22,15 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @ApplicationScoped
 @WithSession
 public class ScoreJobRunService {
     public static final String NESINE_SCORE_PROVIDER = "Nesine \u00b7 Skor";
+    public static final String NESINE_REPAIR_PROVIDER = "Nesine \u00b7 Skor Onar";
     @Inject
     ProviderSyncRunRepository syncRunRepository;
     @Inject
@@ -35,9 +38,19 @@ public class ScoreJobRunService {
 
     @WithTransaction
     public Uni<ProviderSyncRunEntity> start() {
+        return this.start(NESINE_SCORE_PROVIDER);
+    }
+
+    @WithTransaction
+    public Uni<ProviderSyncRunEntity> startRepair() {
+        return this.start(NESINE_REPAIR_PROVIDER);
+    }
+
+    @WithTransaction
+    public Uni<ProviderSyncRunEntity> start(String providerLabel) {
         ProviderSyncRunEntity run = new ProviderSyncRunEntity();
         run.id = UUID.randomUUID();
-        run.provider = NESINE_SCORE_PROVIDER;
+        run.provider = providerLabel;
         run.status = "running";
         run.startedAt = LocalDateTime.now();
         run.requestBudget = 1;
@@ -77,6 +90,46 @@ public class ScoreJobRunService {
                 run.failuresJson = "[]";
             }
             catch (Exception ex) {
+                run.optimizationStatsJson = "{}";
+                run.failuresJson = "[]";
+                run.leagueStatsJson = "[]";
+            }
+        }).replaceWithVoid();
+    }
+
+    @WithTransaction
+    public Uni<Void> finishRepair(UUID id, Map<String, Object> result, String trigger) {
+        return this.syncRunRepository.findById(id).invoke(run -> {
+            if (run == null) {
+                return;
+            }
+            run.finishedAt = LocalDateTime.now();
+            run.requestCount = 1;
+            run.eventsSeen = ((Number) result.getOrDefault("repaired", 0)).intValue();
+            run.settledEvents = ((Number) result.getOrDefault("repaired", 0)).intValue();
+            run.pendingEvents = ((Number) result.getOrDefault("still_missing", 0)).intValue();
+            run.matchesInserted = ((Number) result.getOrDefault("repaired", 0)).intValue();
+            run.oddsSnapshotsInserted = 0;
+            run.status = "ok".equals(String.valueOf(result.get("status"))) ? "succeeded" : "failed";
+            try {
+                LinkedHashMap<String, Object> optimization = new LinkedHashMap<>();
+                optimization.put("job_type", "nesine_score_repair");
+                optimization.put("trigger", trigger);
+                optimization.put("cleared_suspicious", result.get("cleared_suspicious"));
+                optimization.put("from_live_score", result.get("from_live_score"));
+                optimization.put("from_cross_provider", result.get("from_cross_provider"));
+                optimization.put("reference_corrected", result.get("reference_corrected"));
+                optimization.put("repaired", result.get("repaired"));
+                optimization.put("still_missing", result.get("still_missing"));
+                Object corrections = result.get("corrections");
+                optimization.put(
+                        "corrections_count",
+                        corrections instanceof List<?> list ? list.size() : 0);
+                optimization.put("corrections", corrections instanceof List<?> list ? list : List.of());
+                run.optimizationStatsJson = this.mapper.writeValueAsString(optimization);
+                run.leagueStatsJson = "[]";
+                run.failuresJson = "[]";
+            } catch (Exception ex) {
                 run.optimizationStatsJson = "{}";
                 run.failuresJson = "[]";
                 run.leagueStatsJson = "[]";

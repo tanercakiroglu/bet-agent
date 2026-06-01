@@ -52,6 +52,12 @@ public class NesineResource {
         return this.scoreSettlementService.syncScores(true, "manual").map(NesineScoreSettlementService.SettlementResult::toMap);
     }
 
+    @POST
+    @Path(value="/scores/repair")
+    public Uni<Map<String, Object>> repairScores() {
+        return this.scoreSettlementService.repairScoresFromLiveFeed();
+    }
+
     @GET
     @Path(value="/htft")
     public Uni<Map<String, Object>> htft(@QueryParam(value="home") @DefaultValue(value="PSG") String home, @QueryParam(value="away") @DefaultValue(value="Arsenal") String away) {

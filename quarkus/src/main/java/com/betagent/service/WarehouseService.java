@@ -16,6 +16,7 @@ package com.betagent.service;
 
 import com.betagent.domain.LeagueCatalog;
 import com.betagent.domain.Markets;
+import com.betagent.domain.MatchScore;
 import com.betagent.persistence.ReactiveQueries;
 import com.betagent.persistence.entity.MatchEntity;
 import com.betagent.persistence.entity.MatchScoreEntity;
@@ -278,6 +279,99 @@ public class WarehouseService {
             }
             return items;
         });
+    }
+
+    public Uni<List<Map<String, Object>>> listSuspiciousNesineHalfTimeDuplicates(String catalogName) {
+        return ReactiveQueries.rowsNative(
+                        """
+                        select s.provider_match_id, m.home_team, m.away_team, m.match_date,
+                               s.hthg, s.htag, s.fthg, s.ftag
+                        from match_scores s
+                        join matches m on m.provider = s.provider and m.provider_match_id = s.provider_match_id
+                        where s.provider = ?
+                          and s.hthg = s.fthg and s.htag = s.ftag
+                          and (s.fthg + s.ftag) >= 3
+                        """,
+                        catalogName)
+                .map(rows -> {
+                    ArrayList<Map<String, Object>> items = new ArrayList<>();
+                    for (Object[] row : rows) {
+                        LinkedHashMap<String, Object> item = new LinkedHashMap<>();
+                        item.put("provider_match_id", row[0]);
+                        item.put("home_team", row[1]);
+                        item.put("away_team", row[2]);
+                        item.put("match_date", row[3]);
+                        item.put("hthg", row[4]);
+                        item.put("htag", row[5]);
+                        item.put("fthg", row[6]);
+                        item.put("ftag", row[7]);
+                        items.add(item);
+                    }
+                    return items;
+                });
+    }
+
+    @WithTransaction
+    public Uni<Integer> deleteSuspiciousNesineHalfTimeDuplicates(String catalogName) {
+        return ReactiveQueries.executeNative(
+                        """
+                        delete from match_scores
+                        where provider = ?
+                          and hthg = fthg and htag = ftag
+                          and (fthg + ftag) >= 3
+                        """,
+                        catalogName)
+                .map(Integer::intValue);
+    }
+
+    @WithTransaction
+    public Uni<Optional<MatchScoreEntity>> findScore(String catalogName, String providerMatchId) {
+        return this.matchScoreRepository
+                .find("provider = ?1 and providerMatchId = ?2", catalogName, providerMatchId)
+                .firstResult()
+                .map(Optional::ofNullable);
+    }
+
+    @WithTransaction
+    public Uni<Integer> upsertNesineScoreByMatchId(
+            String catalogName, String providerMatchId, int hthg, int htag, int fthg, int ftag) {
+        MatchScore computed = new MatchScore(hthg, htag, fthg, ftag);
+        return this.matchScoreRepository
+                .find("provider = ?1 and providerMatchId = ?2", catalogName, providerMatchId)
+                .firstResult()
+                .chain(existing -> {
+                    if (existing != null) {
+                        if (existing.hthg == hthg
+                                && existing.htag == htag
+                                && existing.fthg == fthg
+                                && existing.ftag == ftag) {
+                            return Uni.createFrom().item(0);
+                        }
+                        existing.hthg = hthg;
+                        existing.htag = htag;
+                        existing.fthg = fthg;
+                        existing.ftag = ftag;
+                        existing.htResult = computed.htResult();
+                        existing.ftResult = computed.ftResult();
+                        existing.htftCode = computed.htftCode();
+                        existing.firstHalfKg = computed.firstHalfKg();
+                        existing.firstHalfKgTarafCode = computed.firstHalfKgTarafCode();
+                        return Uni.createFrom().item(1);
+                    }
+                    MatchScoreEntity score = new MatchScoreEntity();
+                    score.provider = catalogName;
+                    score.providerMatchId = providerMatchId;
+                    score.hthg = hthg;
+                    score.htag = htag;
+                    score.fthg = fthg;
+                    score.ftag = ftag;
+                    score.htResult = computed.htResult();
+                    score.ftResult = computed.ftResult();
+                    score.htftCode = computed.htftCode();
+                    score.firstHalfKg = computed.firstHalfKg();
+                    score.firstHalfKgTarafCode = computed.firstHalfKgTarafCode();
+                    return this.matchScoreRepository.persist(score).replaceWith(1);
+                });
     }
 
     public Uni<Long> countMatchesMissingScores(List<String> catalogs) {

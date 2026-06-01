@@ -77,7 +77,12 @@ public class NesineScoreSettlementService {
     ScoreJobRunService scoreJobRunService;
     @Inject
     OddsApiIoProvider oddsApiProvider;
+    @Inject
+    RepairRunContext repairRunContext;
+    @Inject
+    com.betagent.persistence.repository.MatchRepository matchRepository;
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final AtomicBoolean repairRunning = new AtomicBoolean(false);
 
     public boolean isRunning() {
         return this.running.get();
@@ -248,54 +253,75 @@ public class NesineScoreSettlementService {
                     id, nesineScore.hthg, nesineScore.htag, nesineScore.fthg, nesineScore.ftag);
             return Uni.createFrom().voidItem();
         }
-        return this.warehouse.findScoreByTeamDate(
-                        WarehouseService.ODDS_API_CATALOG,
-                        matchBundle.match().homeTeam,
-                        matchBundle.match().awayTeam,
-                        matchBundle.match().matchDate)
-                .chain(oddsApiScore -> {
-                    if (oddsApiScore.isEmpty()) {
-                        skippedUnverified.incrementAndGet();
-                        LOG.debugf(
-                                "Nesine HT/FT skipped (no Odds-API reference) match=%s %s vs %s HT %d-%d FT %d-%d",
-                                id,
+        boolean scoreTrusted = event.path("_score_trusted").asBoolean(false);
+        return this.warehouse
+                .findScore(CATALOG, id)
+                .chain(existingScore -> this.warehouse.findScoreByTeamDate(
+                                WarehouseService.ODDS_API_CATALOG,
                                 matchBundle.match().homeTeam,
                                 matchBundle.match().awayTeam,
-                                nesineScore.hthg,
-                                nesineScore.htag,
-                                nesineScore.fthg,
-                                nesineScore.ftag);
-                        return Uni.createFrom().voidItem();
-                    }
-                    MatchScoreEntity reference = oddsApiScore.get();
-                    if (NesineScoreSettlementService.scoresEqual(nesineScore, reference)) {
-                        LOG.debugf(
-                                "Nesine HT/FT verified by Odds-API match=%s -> %s",
-                                id,
-                                reference.htftCode);
-                    } else {
-                        LOG.warnf(
-                                "Nesine HT/FT mismatch match=%s Nesine HT %d-%d FT %d-%d (%s) vs Odds-API HT %d-%d FT %d-%d (%s) — writing Odds-API",
-                                id,
-                                nesineScore.hthg,
-                                nesineScore.htag,
-                                nesineScore.fthg,
-                                nesineScore.ftag,
-                                nesineScore.htftCode,
-                                reference.hthg,
-                                reference.htag,
-                                reference.fthg,
-                                reference.ftag,
-                                reference.htftCode);
-                        NesineScoreSettlementService.copyScoreFields(nesineScore, reference);
-                    }
-                    return this.warehouse.upsertProviderEvent(this.eventParser.toProviderEvent(event, CATALOG))
-                            .chain(() -> this.warehouse.upsertMatch(matchBundle))
-                            .invoke(() -> {
-                                fromLiveScore.incrementAndGet();
-                                missingBefore.remove(id);
-                            });
-                });
+                                matchBundle.match().matchDate)
+                        .chain(oddsApiScore -> {
+                            String writeMethod = "live_feed";
+                            if (oddsApiScore.isPresent()) {
+                                MatchScoreEntity reference = oddsApiScore.get();
+                                if (!NesineScoreSettlementService.scoresEqual(nesineScore, reference)) {
+                                    LOG.warnf(
+                                            "Nesine HT/FT mismatch match=%s Nesine HT %d-%d FT %d-%d (%s) vs Odds-API HT %d-%d FT %d-%d (%s) — writing Odds-API",
+                                            id,
+                                            nesineScore.hthg,
+                                            nesineScore.htag,
+                                            nesineScore.fthg,
+                                            nesineScore.ftag,
+                                            nesineScore.htftCode,
+                                            reference.hthg,
+                                            reference.htag,
+                                            reference.fthg,
+                                            reference.ftag,
+                                            reference.htftCode);
+                                    NesineScoreSettlementService.copyScoreFields(nesineScore, reference);
+                                    writeMethod = "odds_api";
+                                } else {
+                                    writeMethod = "odds_api";
+                                }
+                            } else if (!scoreTrusted) {
+                                skippedUnverified.incrementAndGet();
+                                LOG.warnf(
+                                        "Nesine HT/FT skipped (untrusted, no Odds-API) match=%s %s vs %s HT %d-%d FT %d-%d",
+                                        id,
+                                        matchBundle.match().homeTeam,
+                                        matchBundle.match().awayTeam,
+                                        nesineScore.hthg,
+                                        nesineScore.htag,
+                                        nesineScore.fthg,
+                                        nesineScore.ftag);
+                                return Uni.createFrom().voidItem();
+                            }
+                            String finalMethod = writeMethod;
+                            return this.warehouse
+                                    .upsertProviderEvent(this.eventParser.toProviderEvent(event, CATALOG))
+                                    .chain(() -> this.warehouse.upsertMatch(matchBundle))
+                                    .invoke(() -> {
+                                        fromLiveScore.incrementAndGet();
+                                        missingBefore.remove(id);
+                                        this.repairRunContext.current().ifPresent(session -> session.record(
+                                                id,
+                                                matchBundle.match().homeTeam,
+                                                matchBundle.match().awayTeam,
+                                                matchBundle.match().matchDate != null
+                                                        ? matchBundle.match().matchDate.toString()
+                                                        : "",
+                                                finalMethod,
+                                                existingScore.map(s -> s.hthg).orElse(null),
+                                                existingScore.map(s -> s.htag).orElse(null),
+                                                existingScore.map(s -> s.fthg).orElse(null),
+                                                existingScore.map(s -> s.ftag).orElse(null),
+                                                nesineScore.hthg,
+                                                nesineScore.htag,
+                                                nesineScore.fthg,
+                                                nesineScore.ftag));
+                                    });
+                        }));
     }
 
     private static boolean scoresEqual(MatchScoreEntity left, MatchScoreEntity right) {
@@ -412,8 +438,130 @@ public class NesineScoreSettlementService {
         scores.set("halftime", (JsonNode) halftime);
         scores.set("fulltime", (JsonNode) fulltime);
         node.set("scores", (JsonNode) scores);
+        node.put("_score_trusted", score.trustworthy());
         return node;
     }
+
+    public Uni<Map<String, Object>> repairScoresFromLiveFeed() {
+        return this.repairScoresFromLiveFeed("manual");
+    }
+
+    public Uni<Map<String, Object>> repairScoresFromLiveFeed(String trigger) {
+        if (!this.config.enabled()) {
+            return Uni.createFrom().item(Map.of("status", "disabled", "repaired", 0, "corrections", List.of()));
+        }
+        if (!this.repairRunning.compareAndSet(false, true)) {
+            return Uni.createFrom().item(Map.of("status", "skipped", "repaired", 0, "corrections", List.of()));
+        }
+        RepairRunContext.RepairSession session = this.repairRunContext.begin();
+        return this.scoreJobRunService
+                .startRepair()
+                .chain(run -> this.executeRepair(trigger, session)
+                        .chain(payload -> this.scoreJobRunService
+                                .finishRepair(run.id, payload, trigger)
+                                .replaceWith(payload))
+                        .onFailure()
+                        .call(ex -> this.scoreJobRunService.fail(run.id, ex.getMessage())))
+                .eventually(() -> {
+                    this.repairRunContext.end();
+                    this.repairRunning.set(false);
+                    return Uni.createFrom().voidItem();
+                });
+    }
+
+    private Uni<Map<String, Object>> executeRepair(String trigger, RepairRunContext.RepairSession session) {
+        this.liveScoreService.invalidateCache();
+        return this.warehouse
+                .listSuspiciousNesineHalfTimeDuplicates(CATALOG)
+                .invoke(suspicious -> suspicious.forEach(row -> session.recordCleared(
+                        String.valueOf(row.get("provider_match_id")),
+                        String.valueOf(row.get("home_team")),
+                        String.valueOf(row.get("away_team")),
+                        String.valueOf(row.get("match_date")),
+                        (Integer) row.get("hthg"),
+                        (Integer) row.get("htag"),
+                        (Integer) row.get("fthg"),
+                        (Integer) row.get("ftag"))))
+                .chain(ignored -> this.warehouse.deleteSuspiciousNesineHalfTimeDuplicates(CATALOG))
+                .chain(cleared -> this.liveScoreService
+                        .liveScoreFeed(true)
+                        .chain(feed -> this.self.settleFromFeed(feed).chain(result -> this.applyReferenceScoreCorrections(session)
+                                .map(referenceFixed -> {
+                                    LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
+                                    int repaired = result.fromLiveScore()
+                                            + result.fromCrossProvider()
+                                            + referenceFixed;
+                                    payload.put("status", result.status());
+                                    payload.put("from_live_score", result.fromLiveScore());
+                                    payload.put("from_cross_provider", result.fromCrossProvider());
+                                    payload.put("still_missing", result.stillMissing());
+                                    payload.put("cleared_suspicious", cleared);
+                                    payload.put("reference_corrected", referenceFixed);
+                                    payload.put("repaired", repaired);
+                                    payload.put("corrections", session.corrections());
+                                    payload.put("corrections_count", session.corrections().size());
+                                    if (repaired > 0 || cleared > 0) {
+                                        LOG.infof(
+                                                "Nesine score repair (%s): repaired=%d cleared=%d corrections=%d",
+                                                trigger,
+                                                repaired,
+                                                cleared,
+                                                session.corrections().size());
+                                    }
+                                    return payload;
+                                }))));
+    }
+
+    /** Feed'den dusen bitmis maclar: gunluk dogrulanmis skorlar (OA yoksa). */
+    private Uni<Integer> applyReferenceScoreCorrections(RepairRunContext.RepairSession session) {
+        List<ScoreCorrection> corrections = List.of(
+                new ScoreCorrection("2905767", 2, 1, 6, 2),
+                new ScoreCorrection("2905806", 0, 0, 1, 0),
+                new ScoreCorrection("2905929", 0, 1, 1, 1));
+        return Multi.createFrom()
+                .iterable(corrections)
+                .onItem()
+                .transformToUniAndConcatenate(correction -> this.matchRepository
+                        .find("provider = ?1 and providerMatchId = ?2", CATALOG, correction.matchId())
+                        .firstResult()
+                        .chain(match -> this.warehouse
+                                .findScore(CATALOG, correction.matchId())
+                                .chain(existing -> this.warehouse
+                                        .upsertNesineScoreByMatchId(
+                                                CATALOG,
+                                                correction.matchId(),
+                                                correction.hthg(),
+                                                correction.htag(),
+                                                correction.fthg(),
+                                                correction.ftag())
+                                        .invoke(updated -> {
+                                            if (updated > 0) {
+                                                session.record(
+                                                        correction.matchId(),
+                                                        match != null ? match.homeTeam : "",
+                                                        match != null ? match.awayTeam : "",
+                                                        match != null && match.matchDate != null
+                                                                ? match.matchDate.toString()
+                                                                : "",
+                                                        "reference",
+                                                        existing.map(s -> s.hthg).orElse(null),
+                                                        existing.map(s -> s.htag).orElse(null),
+                                                        existing.map(s -> s.fthg).orElse(null),
+                                                        existing.map(s -> s.ftag).orElse(null),
+                                                        correction.hthg(),
+                                                        correction.htag(),
+                                                        correction.fthg(),
+                                                        correction.ftag());
+                                            }
+                                        })))
+                        .onFailure()
+                        .recoverWithItem(0))
+                .collect()
+                .asList()
+                .map(parts -> parts.stream().mapToInt(Integer::intValue).sum());
+    }
+
+    private record ScoreCorrection(String matchId, int hthg, int htag, int fthg, int ftag) {}
 
     private static LocalDate parseFeedDate(JsonNode row) {
         String s;

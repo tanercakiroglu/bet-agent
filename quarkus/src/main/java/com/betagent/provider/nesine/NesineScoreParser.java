@@ -22,7 +22,23 @@ public final class NesineScoreParser {
     private NesineScoreParser() {
     }
 
-    public record ResolvedScore(int hthg, int htag, int fthg, int ftag, String feedId, boolean secondHalfConsistent) {
+    public record ResolvedScore(
+            int hthg, int htag, int fthg, int ftag, String feedId, boolean secondHalfConsistent, boolean htDerivedFromSecondHalf) {
+
+        public boolean trustworthy() {
+            if (secondHalfConsistent) {
+                return true;
+            }
+            if (htDerivedFromSecondHalf) {
+                return true;
+            }
+            return !NesineScoreParser.isSuspiciousHalfTimeDuplicate(hthg, htag, fthg, ftag);
+        }
+    }
+
+    /** T=19 sometimes copies full-time (e.g. HT 6-2 when FT is 6-2). */
+    public static boolean isSuspiciousHalfTimeDuplicate(int hthg, int htag, int fthg, int ftag) {
+        return hthg == fthg && htag == ftag && fthg + ftag >= 3;
     }
 
     public static Optional<ResolvedScore> resolveFinishedRow(JsonNode row) {
@@ -46,6 +62,7 @@ public final class NesineScoreParser {
         int hthg;
         int htag;
         boolean secondHalfConsistent = false;
+        boolean htDerivedFromSecondHalf = false;
 
         if (halfTime.isEmpty()) {
             if (secondHalf.isEmpty()) {
@@ -60,6 +77,7 @@ public final class NesineScoreParser {
             hthg = fthg - sh[0];
             htag = ftag - sh[1];
             secondHalfConsistent = true;
+            htDerivedFromSecondHalf = true;
         } else {
             hthg = halfTime.get()[0];
             htag = halfTime.get()[1];
@@ -71,16 +89,18 @@ public final class NesineScoreParser {
                     int derivedA = ftag - sh[1];
                     boolean derivedValid = isValidScore(derivedH, derivedA, fthg, ftag);
                     boolean htEqualsFt = hthg == fthg && htag == ftag;
-                    boolean derivedFromSecondHalf = derivedValid
-                            && sh[0] > 0
-                            && (derivedH < hthg || derivedA < htag);
-                    if (derivedFromSecondHalf && htEqualsFt) {
+                    boolean shouldDerive = derivedValid
+                            && (sh[0] + sh[1] > 0)
+                            && ((htEqualsFt && isSuspiciousHalfTimeDuplicate(hthg, htag, fthg, ftag))
+                                    || (derivedH < hthg && hthg > 0));
+                    if (shouldDerive && (derivedH != hthg || derivedA != htag)) {
                         LOG.infof(
                                 "Nesine HT corrected from T=2 feed=%s T19=%d-%d T1=%d-%d T2=%d-%d -> HT %d-%d",
                                 feedId, hthg, htag, fthg, ftag, sh[0], sh[1], derivedH, derivedA);
                         hthg = derivedH;
                         htag = derivedA;
                         secondHalfConsistent = true;
+                        htDerivedFromSecondHalf = true;
                     }
                 }
                 if (!secondHalfConsistent) {
@@ -95,7 +115,18 @@ public final class NesineScoreParser {
             LOG.warnf("Rejecting invalid Nesine score feed=%s HT=%d-%d FT=%d-%d", feedId, hthg, htag, fthg, ftag);
             return Optional.empty();
         }
-        return Optional.of(new ResolvedScore(hthg, htag, fthg, ftag, feedId, secondHalfConsistent));
+        if (isSuspiciousHalfTimeDuplicate(hthg, htag, fthg, ftag) && !htDerivedFromSecondHalf) {
+            LOG.warnf(
+                    "Rejecting suspicious Nesine HT=FT duplicate feed=%s HT=%d-%d FT=%d-%d",
+                    feedId,
+                    hthg,
+                    htag,
+                    fthg,
+                    ftag);
+            return Optional.empty();
+        }
+        return Optional.of(
+                new ResolvedScore(hthg, htag, fthg, ftag, feedId, secondHalfConsistent, htDerivedFromSecondHalf));
     }
 
     public static boolean isValidScore(int hthg, int htag, int fthg, int ftag) {
