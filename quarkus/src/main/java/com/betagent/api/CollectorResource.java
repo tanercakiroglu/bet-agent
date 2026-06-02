@@ -170,8 +170,8 @@ public class CollectorResource {
         if (request == null || request.min_samples == null || request.min_edge == null || request.min_confidence_low == null) {
             return Uni.createFrom().item(Response.status((Response.Status)Response.Status.BAD_REQUEST).entity(Map.of("message", "min_samples, min_edge, min_confidence_low zorunlu.")).build());
         }
-        if (request.min_samples < 1 || request.min_samples > 200) {
-            return Uni.createFrom().item(Response.status((Response.Status)Response.Status.BAD_REQUEST).entity(Map.of("message", "min_samples 1-200 arasi olmali.")).build());
+        if (request.min_samples < 0 || request.min_samples > 200) {
+            return Uni.createFrom().item(Response.status((Response.Status)Response.Status.BAD_REQUEST).entity(Map.of("message", "min_samples 0-200 arasi olmali.")).build());
         }
         if (request.min_edge < 0.0 || request.min_edge > 1.0) {
             return Uni.createFrom().item(Response.status((Response.Status)Response.Status.BAD_REQUEST).entity(Map.of("message", "min_edge 0.00-1.00 arasi olmali.")).build());
@@ -179,16 +179,29 @@ public class CollectorResource {
         if (request.min_confidence_low < 0.0 || request.min_confidence_low > 1.0) {
             return Uni.createFrom().item(Response.status((Response.Status)Response.Status.BAD_REQUEST).entity(Map.of("message", "min_confidence_low 0.00-1.00 arasi olmali.")).build());
         }
-        OddsDataProvider provider = this.providerRegistry.active();
-        return this.predictionSettingsService
-                .update(
-                        provider.catalogName(),
+        OddsDataProvider activeProvider = this.providerRegistry.active();
+        boolean applyAllProviders = request.apply_all_providers == null || request.apply_all_providers;
+        List<String> targetCatalogs = applyAllProviders
+                ? this.providerRegistry.configuredCatalogNames()
+                : List.of(activeProvider.catalogName());
+        return Multi.createFrom()
+                .iterable(targetCatalogs)
+                .onItem()
+                .transformToUniAndConcatenate(catalog -> this.predictionSettingsService.update(
+                        catalog,
                         request.min_samples,
                         request.min_edge,
                         request.min_confidence_low,
-                        request.wilson_scale_by_implied == null || request.wilson_scale_by_implied)
+                        request.wilson_scale_by_implied == null || request.wilson_scale_by_implied))
+                .collect()
+                .asList()
+                .chain(ignored -> this.predictionSettingsService.resolve(activeProvider.catalogName()))
                 .chain(PredictionSettingsService::toMap)
-                .map(payload -> Response.ok(payload).build());
+                .map(payload -> {
+                    payload.put("applied_catalogs", targetCatalogs);
+                    payload.put("apply_all_providers", applyAllProviders);
+                    return Response.ok(payload).build();
+                });
     }
 
     @POST
@@ -202,6 +215,18 @@ public class CollectorResource {
     @Path(value="/future-candidates")
     public Uni<Map<String, Object>> futureCandidates(@QueryParam(value="limit") @DefaultValue(value="25") int limit) {
         return this.sharpPredictionService.predict(limit).map(items -> Map.of("items", items));
+    }
+
+    @GET
+    @Path(value="/predictions/diagnostics")
+    public Uni<Map<String, Object>> predictionDiagnostics() {
+        return Multi.createFrom()
+                .iterable(this.providerRegistry.configuredCatalogNames())
+                .onItem()
+                .transformToUniAndConcatenate(this.sharpPredictionService::diagnosticsForCatalog)
+                .collect()
+                .asList()
+                .map(items -> Map.of("items", items));
     }
 
     @GET
@@ -276,6 +301,7 @@ public class CollectorResource {
         public Double min_edge;
         public Double min_confidence_low;
         public Boolean wilson_scale_by_implied;
+        public Boolean apply_all_providers;
     }
 }
 

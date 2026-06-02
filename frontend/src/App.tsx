@@ -248,6 +248,22 @@ type Prediction = {
   rationale?: string;
 };
 
+type PredictionDiagnostic = {
+  provider: string;
+  fixtures_total: number;
+  fixtures_in_catalog: number;
+  fixtures_with_candidate_odds: number;
+  historical_samples: number;
+  market_outcomes_checked: number;
+  rejected_by_sample: number;
+  rejected_by_edge_or_wilson: number;
+  passed: number;
+  min_samples: number;
+  min_edge: number;
+  min_confidence_low: number;
+  wilson_scale_by_implied: boolean;
+};
+
 type ScoreRow = {
   provider_match_id: string;
   match_date: string;
@@ -489,6 +505,7 @@ export default function App() {
   const htftPageRef = useRef<Record<string, number>>({});
   const [scores, setScores] = useState<ScoreRow[]>([]);
   const [jobHistory, setJobHistory] = useState<JobHistoryItem[]>([]);
+  const [predictionDiagnostics, setPredictionDiagnostics] = useState<PredictionDiagnostic[]>([]);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [status, setStatus] = useState("Yukleniyor...");
   const [busy, setBusy] = useState(false);
@@ -578,6 +595,12 @@ export default function App() {
     }
     await Promise.resolve();
     setPredictions(bootstrap.predictions ?? []);
+    try {
+      const diagnostics = await api<{ items: PredictionDiagnostic[] }>("/predictions/diagnostics");
+      setPredictionDiagnostics(diagnostics.items ?? []);
+    } catch {
+      setPredictionDiagnostics([]);
+    }
     setJobHistory(bootstrap.history ?? []);
     setScores(bootstrap.scores ?? []);
     return dash;
@@ -635,7 +658,7 @@ export default function App() {
 
   async function runNesineScoreSync() {
     setBusy(true);
-    setStatus("Nesine skor senkronu baslatildi...");
+    setStatus("Nesine skor sync (manuel) baslatildi...");
     try {
       const result = await api<{
         status: string;
@@ -647,8 +670,8 @@ export default function App() {
       const live = result.from_live_score ?? 0;
       const oddsApi = result.from_cross_provider ?? 0;
       const missing = result.still_missing ?? 0;
-      await refresh(`Nesine skor sync: live=${live}, odds-api=${oddsApi}, eksik=${missing}`);
-      infoPopup(`Nesine skor sync tamam · live=${live} · odds-api=${oddsApi} · eksik=${missing}`);
+      await refresh(`Nesine sync: live=${live}, odds-api=${oddsApi}, eksik=${missing}`);
+      infoPopup(`Skor sync tamam (10 dk job ile ayni) · live=${live} · odds-api=${oddsApi} · eksik=${missing}`);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "Nesine skor sync basarisiz");
     } finally {
@@ -658,7 +681,7 @@ export default function App() {
 
   async function runNesineScoreRepair() {
     setBusy(true);
-    setStatus("Nesine skor onarimi baslatildi...");
+    setStatus("Nesine skor onarim (manuel) baslatildi...");
     try {
       const result = await api<{
         status: string;
@@ -673,31 +696,9 @@ export default function App() {
       const cleared = result.cleared_suspicious ?? 0;
       const corrections = result.corrections_count ?? 0;
       await refresh(`Nesine onarim: ${repaired} duzeltme, ${corrections} kayit`);
-      infoPopup(`Skor onarim tamam · duzeltme=${repaired} · kayit=${corrections} · supheli silinen=${cleared}`);
+      infoPopup(`Skor onarim tamam (:20/:40 job ile ayni) · duzeltme=${repaired} · kayit=${corrections} · supheli silinen=${cleared}`);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "Nesine skor onarim basarisiz");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runNesineScoreReconcile() {
-    setBusy(true);
-    setStatus("Odds-API yedek skor doldurma baslatildi...");
-    try {
-      const result = await api<{
-        status: string;
-        filled_missing?: number;
-        replaced_invalid?: number;
-        still_missing?: number;
-        still_invalid?: number;
-      }>("/nesine/scores/reconcile", { method: "POST" });
-      const filled = result.filled_missing ?? 0;
-      const replaced = result.replaced_invalid ?? 0;
-      await refresh(`Odds-API yedek: doldurulan=${filled}, duzeltilen=${replaced}`);
-      infoPopup(`Odds-API yedek skor · doldurulan=${filled} · duzeltilen=${replaced}`);
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "Odds-API yedek skor basarisiz");
     } finally {
       setBusy(false);
     }
@@ -732,6 +733,12 @@ export default function App() {
     try {
       const preds = await api<{ items: Prediction[] }>("/predictions?limit=100");
       setPredictions(preds.items);
+      try {
+        const diagnostics = await api<{ items: PredictionDiagnostic[] }>("/predictions/diagnostics");
+        setPredictionDiagnostics(diagnostics.items ?? []);
+      } catch {
+        setPredictionDiagnostics([]);
+      }
       setStatus(`Keskin tahminler guncellendi (${preds.items.length})`);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "Tahminler guncellenemedi");
@@ -780,6 +787,12 @@ export default function App() {
       setSettingsDirty(false);
       const preds = await api<{ items: Prediction[] }>("/predictions?limit=30");
       setPredictions(preds.items);
+      try {
+        const diagnostics = await api<{ items: PredictionDiagnostic[] }>("/predictions/diagnostics");
+        setPredictionDiagnostics(diagnostics.items ?? []);
+      } catch {
+        setPredictionDiagnostics([]);
+      }
       setStatus(`Ayarlar uygulandi, tahminler hesaplandi (${preds.items.length})`);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "Tahminler hesaplanamadi");
@@ -797,6 +810,12 @@ export default function App() {
       setSettingsDirty(false);
       const preds = await api<{ items: Prediction[] }>("/predictions?limit=30");
       setPredictions(preds.items);
+      try {
+        const diagnostics = await api<{ items: PredictionDiagnostic[] }>("/predictions/diagnostics");
+        setPredictionDiagnostics(diagnostics.items ?? []);
+      } catch {
+        setPredictionDiagnostics([]);
+      }
       setStatus(`Ayarlar en keskin varsayilana dondu (${preds.items.length} tahmin).`);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "Varsayilan ayara donulemedi");
@@ -849,32 +868,24 @@ export default function App() {
               <button
                 className="btn ghost"
                 disabled={busy}
+                title="Zamanlanmis job: her 10 dk (NesineScoreJob)"
                 onClick={() => {
-                  infoPopup("Bilgi: Nesine canli skor feed senkronu baslatiliyor.");
+                  infoPopup("10 dk cron ile ayni: canli feed + Odds-API capraz skor sync.");
                   runNesineScoreSync();
                 }}
               >
-                Nesine Skor Sync
+                Skor Sync
               </button>
               <button
                 className="btn ghost"
                 disabled={busy}
+                title="Zamanlanmis job: her saat :20 ve :40 (NesineScoreRepairJob)"
                 onClick={() => {
-                  infoPopup("Bilgi: Supheli skorlar silinip canli feed yeniden isleniyor.");
+                  infoPopup(":20/:40 cron ile ayni: supheli skor silme + canli feed onarim.");
                   runNesineScoreRepair();
                 }}
               >
-                Nesine Skor Onar
-              </button>
-              <button
-                className="btn ghost"
-                disabled={busy}
-                onClick={() => {
-                  infoPopup("Bilgi: Eksik/gecersiz Nesine skorlari Odds-API ile dolduruluyor.");
-                  runNesineScoreReconcile();
-                }}
-              >
-                Odds-API Yedek Skor
+                Skor Onar
               </button>
             </>
           )}
@@ -935,10 +946,10 @@ export default function App() {
           <div className="panelHead">
             <h2>Son Nesine skor onarimi</h2>
             <span className="meta">
-              Her saat :20 ve :40 · cron{" "}
+              Otomatik: sync 10 dk · onarim :20/:40
               {dashboard.nesine_score_repair.has_run
-                ? `${dashboard.nesine_score_repair.repaired ?? 0} duzeltme · ${dashboard.nesine_score_repair.corrections_count ?? 0} kayit`
-                : "henuz calismadi"}
+                ? ` · son: ${dashboard.nesine_score_repair.repaired ?? 0} duzeltme, ${dashboard.nesine_score_repair.corrections_count ?? 0} kayit`
+                : ""}
             </span>
           </div>
           {!dashboard.nesine_score_repair.has_run ? (
@@ -1500,7 +1511,20 @@ export default function App() {
                 {section.title} <span>{section.items.length}</span>
               </h3>
               {section.items.length === 0 ? (
-                <p className="empty">Bu kaynak icin keskin tahmin yok. Veri topla veya filtreleri gevset.</p>
+                <>
+                  <p className="empty">Bu kaynak icin keskin tahmin yok. Veri topla veya filtreleri gevset.</p>
+                  {section.id === "nesine-htft" &&
+                    (() => {
+                      const diag = predictionDiagnostics.find((d) => d.provider === "Nesine");
+                      if (!diag) return null;
+                      return (
+                        <p className="hint">
+                          Teshis · aday market: {diag.market_outcomes_checked} · ornek yetersiz: {diag.rejected_by_sample}
+                          {" "}· edge/wilson elenen: {diag.rejected_by_edge_or_wilson} · gecen: {diag.passed}
+                        </p>
+                      );
+                    })()}
+                </>
               ) : (
                 <div className="grid">
                   {section.items.map((p) => {
@@ -1624,7 +1648,7 @@ export default function App() {
           </div>
           <p className="hint">
             Supheli IY=MS kopyalari yazilmaz. Guvenilir parse veya Odds-API varsa skor guncellenir.
-            Hatali kayitlar icin ustte &quot;Nesine Skor Onar&quot; kullan.
+            Hatali kayitlar icin ustte &quot;Skor Onar&quot; ile zamanlanmis onarim job&apos;unu manuel calistir.
           </p>
           {(dashboard?.missing_scores?.length ?? 0) === 0 ? (
             <p className="empty">Tum takip edilen maclarda skor mevcut veya henuz odds yok.</p>

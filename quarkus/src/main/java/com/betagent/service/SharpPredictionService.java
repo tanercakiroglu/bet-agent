@@ -58,6 +58,109 @@ public class SharpPredictionService {
                 });
     }
 
+    public Uni<Map<String, Object>> diagnosticsForCatalog(String catalogName) {
+        boolean nesineOnlyHtft = LeagueCatalog.NESINE_CATALOG.equals(catalogName);
+        boolean oddsApiKgOnly = LeagueCatalog.ODDS_API_IO_CATALOG.equals(catalogName);
+        return predictionSettingsService.resolve(catalogName).chain(thresholds -> loadEventsById(catalogName)
+                .chain(eventsById -> loadPendingFixtures(catalogName, eventsById).chain(fixturesRaw -> loadHistoricalSamples(
+                                catalogName,
+                                nesineOnlyHtft,
+                                oddsApiKgOnly)
+                        .map(samples -> {
+                            Map<String, BandStats> global = statsByBand(samples, s -> true);
+                            Map<String, Map<String, BandStats>> byLeague = new HashMap<>();
+                            for (HistoricalSample sample : samples) {
+                                byLeague.computeIfAbsent(sample.competitionCode(), ignored -> new HashMap<>());
+                                String key = bandKey(sample.market(), sample.outcome(), sample.band());
+                                byLeague.get(sample.competitionCode())
+                                        .compute(key, (k, v) -> v == null ? BandStats.from(sample) : v.add(sample));
+                            }
+                            int fixturesInCatalog = 0;
+                            int fixturesWithCandidateOdds = 0;
+                            int marketOutcomesChecked = 0;
+                            int rejectedBySample = 0;
+                            int rejectedByEdgeOrWilson = 0;
+                            int passed = 0;
+                            for (PendingFixture fixture : fixturesRaw) {
+                                if (!(nesineOnlyHtft || inCatalog(fixture, eventsById))) {
+                                    continue;
+                                }
+                                fixturesInCatalog++;
+                                if (!hasCandidateOdds(fixture, nesineOnlyHtft, oddsApiKgOnly)) {
+                                    continue;
+                                }
+                                fixturesWithCandidateOdds++;
+                                for (Map.Entry<String, Double> marketOutcome : fixture.markets().entrySet()) {
+                                    String[] parts = marketOutcome.getKey().split("::");
+                                    if (parts.length != 2) {
+                                        continue;
+                                    }
+                                    String market = parts[0];
+                                    String outcome = parts[1];
+                                    if (nesineOnlyHtft && !Markets.HTFT.equals(market)) {
+                                        continue;
+                                    }
+                                    if (oddsApiKgOnly
+                                            && !Markets.FIRST_HALF_KG_TARAF.equals(market)
+                                            && !(Markets.FIRST_HALF_BTTS.equals(market) && "VAR".equals(outcome))) {
+                                        continue;
+                                    }
+                                    if (!Markets.CANDIDATE_OUTCOMES.getOrDefault(market, Set.of()).contains(outcome)) {
+                                        continue;
+                                    }
+                                    double odds = marketOutcome.getValue();
+                                    if (odds <= 1.0) {
+                                        continue;
+                                    }
+                                    marketOutcomesChecked++;
+                                    String band = ScoreMath.oddsBand(odds);
+                                    String key = bandKey(market, outcome, band);
+                                    BandStats stats = byLeague
+                                            .getOrDefault(fixture.competitionCode(), Map.of())
+                                            .get(key);
+                                    if (stats == null || stats.total() < thresholds.minSamples()) {
+                                        stats = global.get(key);
+                                    }
+                                    if (stats == null || stats.total() < thresholds.minSamples()) {
+                                        rejectedBySample++;
+                                        continue;
+                                    }
+                                    double hitRate = stats.hitRate();
+                                    int sampleCount = stats.total();
+                                    int hitCount = stats.hits();
+                                    double implied = 1 / odds;
+                                    double edge = hitRate - implied;
+                                    double confidenceLow = ScoreMath.wilsonLow(hitCount, sampleCount, 1.96);
+                                    double wilsonFloor = ScoreMath.wilsonMinThreshold(
+                                            market, implied, thresholds.minConfidenceLow(), thresholds.wilsonScaleByImplied());
+                                    double minEdge = Markets.FIRST_HALF_BTTS.equals(market)
+                                            ? Math.min(thresholds.minEdge(), 0.05)
+                                            : thresholds.minEdge();
+                                    if (edge < minEdge || confidenceLow < wilsonFloor) {
+                                        rejectedByEdgeOrWilson++;
+                                        continue;
+                                    }
+                                    passed++;
+                                }
+                            }
+                            LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
+                            payload.put("provider", catalogName);
+                            payload.put("fixtures_total", fixturesRaw.size());
+                            payload.put("fixtures_in_catalog", fixturesInCatalog);
+                            payload.put("fixtures_with_candidate_odds", fixturesWithCandidateOdds);
+                            payload.put("historical_samples", samples.size());
+                            payload.put("market_outcomes_checked", marketOutcomesChecked);
+                            payload.put("rejected_by_sample", rejectedBySample);
+                            payload.put("rejected_by_edge_or_wilson", rejectedByEdgeOrWilson);
+                            payload.put("passed", passed);
+                            payload.put("min_samples", thresholds.minSamples());
+                            payload.put("min_edge", thresholds.minEdge());
+                            payload.put("min_confidence_low", thresholds.minConfidenceLow());
+                            payload.put("wilson_scale_by_implied", thresholds.wilsonScaleByImplied());
+                            return payload;
+                        }))));
+    }
+
     private Uni<List<Map<String, Object>>> predictForCatalog(OddsDataProvider provider, int limit) {
         String catalogName = provider.catalogName();
         boolean nesineOnlyHtft = LeagueCatalog.NESINE_CATALOG.equals(catalogName);
@@ -270,7 +373,8 @@ public class SharpPredictionService {
                 String leagueName = String.valueOf(row[1]);
                 String leagueSlug = String.valueOf(row[2]);
                 String kgTarafCode = row[3] == null ? "" : String.valueOf(row[3]);
-                if (!LeagueCatalog.inCatalog(leagueName, leagueSlug)
+                if (!nesineOnlyHtft
+                        && !LeagueCatalog.inCatalog(leagueName, leagueSlug)
                         && !LeagueCatalog.inCatalog(competitionCode)) {
                     continue;
                 }
