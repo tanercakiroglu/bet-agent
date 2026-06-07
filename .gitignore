@@ -55,6 +55,9 @@ desktop.ini
 *~
 .cursor/
 
+# Database dumps (commit only .sql.gz)
+dumps/*.sql
+
 # Local debug dumps (large JSON / temp)
 bootstrap-test.json
 nesine-bulten.json
