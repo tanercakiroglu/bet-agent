@@ -15,6 +15,8 @@ import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -82,6 +84,9 @@ public class SharpPredictionService {
                             int rejectedByEdgeOrWilson = 0;
                             int passed = 0;
                             for (PendingFixture fixture : fixturesRaw) {
+                                if (!isUpcoming(fixture, eventsById)) {
+                                    continue;
+                                }
                                 if (!(nesineOnlyHtft || inCatalog(fixture, eventsById))) {
                                     continue;
                                 }
@@ -168,6 +173,7 @@ public class SharpPredictionService {
         return predictionSettingsService.resolve(catalogName).chain(thresholds -> loadEventsById(catalogName)
                 .chain(eventsById -> loadPendingFixtures(catalogName, eventsById).chain(fixturesRaw -> {
                     List<PendingFixture> fixtures = fixturesRaw.stream()
+                            .filter(f -> isUpcoming(f, eventsById))
                             .filter(f -> nesineOnlyHtft || inCatalog(f, eventsById))
                             .filter(f -> hasCandidateOdds(f, nesineOnlyHtft, oddsApiKgOnly))
                             .toList();
@@ -455,6 +461,23 @@ public class SharpPredictionService {
                 .map(rows -> rows.stream().collect(Collectors.toMap(e -> e.providerMatchId, e -> e, (a, b) -> a)));
     }
 
+    private static boolean isUpcoming(PendingFixture fixture, Map<String, ProviderEventEntity> eventsById) {
+        ProviderEventEntity event = eventsById.get(fixture.eventId());
+        if (event != null && event.eventDate != null) {
+            return !event.eventDate.isBefore(LocalDateTime.now());
+        }
+        String dateText = fixture.matchDate();
+        if (dateText == null || dateText.isBlank()) {
+            return false;
+        }
+        try {
+            LocalDate date = LocalDate.parse(dateText.substring(0, Math.min(10, dateText.length())));
+            return !date.isBefore(LocalDate.now());
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
     private static boolean inCatalog(PendingFixture fixture, Map<String, ProviderEventEntity> eventsById) {
         ProviderEventEntity event = eventsById.get(fixture.eventId());
         if (event != null) {
@@ -506,7 +529,9 @@ public class SharpPredictionService {
                         from odds_snapshots where provider = :catalog and snapshot_type = 'hourly_pending'
                     ) o
                     inner join provider_events e on e.provider = :catalog and e.provider_match_id = o.provider_match_id
-                    where o.rn = 1 and lower(coalesce(e.status, 'pending')) not in ('settled', 'finished', 'complete', 'ft')
+                    where o.rn = 1
+                      and lower(coalesce(e.status, 'pending')) not in ('settled', 'finished', 'complete', 'ft')
+                      and e.event_date >= current_timestamp
                     """);
             query.setParameter("catalog", catalogName);
             return query.getResultList();
